@@ -170,9 +170,9 @@ function renderChanges(changes) {
   container.innerHTML = '';
 
   if (!changes.length) {
-    container.innerHTML = '<p class="muted">No proposed changes to review.</p>';
-    // Auto-submit empty decisions to advance the job
-    submitDecisions();
+    container.innerHTML = '<p class="muted">No proposed changes to review at this stage — waiting for more…</p>';
+    // Resume polling to check for more changes
+    _pollTimer = setTimeout(() => pollForChanges(window.REVIEW_STATE.jobId), 2000);
     return;
   }
 
@@ -186,10 +186,10 @@ function renderChanges(changes) {
 
   // Batch controls
   document.getElementById('approve-all-btn')?.addEventListener('click', () => {
-    changes.forEach((c, i) => setDecision(c.change_id, true, '', i));
+    changes.forEach((c, i) => setDecision(c.change_id || String(i), true, '', i));
   });
   document.getElementById('deny-all-btn')?.addEventListener('click', () => {
-    changes.forEach((c, i) => setDecision(c.change_id, false, '', i));
+    changes.forEach((c, i) => setDecision(c.change_id || String(i), false, '', i));
   });
   document.getElementById('submit-decisions-btn')?.addEventListener('click', submitDecisions);
 }
@@ -201,8 +201,23 @@ function buildChangeCard(change, idx) {
 
   const op = change.operation || 'update';
   const explanation = change.ai_explanation || '';
-  const oldHtml = change.old_html || '<em>(empty)</em>';
-  const newHtml = change.new_html || '<em>(empty)</em>';
+
+  // Determine before/after labels and content based on operation type
+  const isMove   = op === 'move';
+  const isDelete = op === 'delete';
+  const isInsert = op === 'insert';
+
+  const beforeLabel = isDelete ? 'Removing' : 'Before';
+  const afterLabel  = isInsert ? 'Inserting' : (isMove ? 'Destination' : 'After');
+
+  const oldHtml = change.old_html
+    || (isInsert ? '<em style="color:#718096">New content — nothing here before.</em>' : '<em>(empty)</em>');
+
+  const newHtml = (isMove && !change.new_html)
+    ? '<em style="color:#718096">Content is being relocated to its new position in the document.</em>'
+    : (isDelete && !change.new_html)
+      ? '<em style="color:#9b2c2c">This content will be removed.</em>'
+      : (change.new_html || '<em>(empty)</em>');
 
   card.innerHTML = `
     <div class="change-card-header">
@@ -212,11 +227,11 @@ function buildChangeCard(change, idx) {
     ${explanation ? `<div class="change-card-explanation">${escHtml(explanation)}</div>` : ''}
     <div class="change-card-diff">
       <div class="diff-before">
-        <div class="diff-label">Before</div>
+        <div class="diff-label">${beforeLabel}</div>
         <div class="diff-content">${oldHtml}</div>
       </div>
       <div class="diff-after">
-        <div class="diff-label">After</div>
+        <div class="diff-label">${afterLabel}</div>
         <div class="diff-content">${newHtml}</div>
       </div>
     </div>
@@ -228,12 +243,12 @@ function buildChangeCard(change, idx) {
   `;
 
   card.querySelector('.approve-btn').addEventListener('click', (e) => {
-    const id = e.target.dataset.id;
+    const id = e.target.dataset.id || String(idx);
     const i = parseInt(e.target.dataset.idx);
     setDecision(id, true, '', i);
   });
   card.querySelector('.deny-btn').addEventListener('click', (e) => {
-    const id = e.target.dataset.id;
+    const id = e.target.dataset.id || String(idx);
     const i = parseInt(e.target.dataset.idx);
     const feedback = card.querySelector('.feedback-input').value;
     setDecision(id, false, feedback, i);
@@ -256,8 +271,9 @@ async function submitDecisions() {
   const decisions = Object.values(_decisions);
 
   // Fill in any undecided changes as approved (default)
-  _pendingChanges.forEach(c => {
-    if (!_decisions[c.change_id]) {
+  _pendingChanges.forEach((c, i) => {
+    const key = c.change_id || String(i);
+    if (!_decisions[key]) {
       decisions.push({ change_id: c.change_id, approved: true, feedback: '' });
     }
   });
