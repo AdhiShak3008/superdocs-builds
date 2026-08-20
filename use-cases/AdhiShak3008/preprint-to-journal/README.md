@@ -230,7 +230,10 @@ Test coverage:
 
 ## Demo
 
-A synthetic manuscript (`demo/sample_manuscript.md`) is provided for testing. Convert it to DOCX using any word processor before uploading.
+A synthetic manuscript is provided for testing in two formats:
+
+- **`demo/sample_manuscript.docx`** — ready to upload directly into the app
+- **`demo/sample_manuscript.md`** — the same content in Markdown for reference
 
 The demo manuscript is a fictional neuroscience study with realistic structure, statistics, equations, self-citations, and acknowledgements — designed to exercise all transformation and blinding features.
 
