@@ -248,4 +248,26 @@ code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; font-size: 0.8
   padding: 6px 8px;
   border: 1px solid #e2e8f0;
 }
+.section-full-text { margin-top: 6px; }
+.section-full-text summary {
+  font-size: 0.8rem;
+  color: #1d4ed8;
+  cursor: pointer;
+  font-weight: 500;
+}
+.section-full-text summary:hover { text-decoration: underline; }
+.section-full-text-content {
+  font-size: 0.82rem;
+  color: #1e293b;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+  background: #f8fafc;
+  border-radius: 4px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  margin-top: 6px;
+}
 .section-item-sub { margin-left: 24px; }

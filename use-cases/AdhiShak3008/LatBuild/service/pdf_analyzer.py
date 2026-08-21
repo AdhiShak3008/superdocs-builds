@@ -454,19 +454,20 @@ class PDFAnalyzer:
 
         pw = float(page_obj.width)
 
-        # Per-page column detection
-        split_x, cols, two_col = self._find_split(words, pw, page_height)
-
-        # If grammar says two-column but this page looks single (e.g. title page),
-        # trust per-page detection. If per-page is ambiguous, trust grammar.
-        if grammar.column_count == 2 and not two_col:
-            # Title / cover page — keep as single column
-            pass
-        elif grammar.column_count == 2 and two_col:
-            pass  # use per-page split_x
-        elif grammar.column_count == 1:
-            split_x = 0.0
+        # Column split strategy:
+        # If grammar established a two-column layout, use the grammar's split_x
+        # consistently on ALL pages. Per-page detection is unreliable because
+        # figures, captions, and other non-text elements distort the midpoint
+        # histogram on individual pages.
+        # Only fall back to per-page detection if grammar says single-column.
+        if grammar.column_count == 2 and grammar.split_x > 0:
+            split_x = grammar.split_x
             cols = grammar.column_regions
+        else:
+            split_x, cols, two_col = self._find_split(words, pw, page_height)
+            if grammar.column_count == 1:
+                split_x = 0.0
+                cols = grammar.column_regions
 
         # Split words by column, maintaining strict separation
         col_word_lists = self._split_words_by_column(words, split_x, pw, page_height)

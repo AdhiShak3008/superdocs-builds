@@ -43,6 +43,12 @@
             </span>
             {% if section.full_text %}
             <p class="section-preview">{{ section.full_text[:250] }}{% if section.full_text | length > 250 %}…{% endif %}</p>
+            {% if section.full_text | length > 250 %}
+            <details class="section-full-text">
+              <summary>View full text ({{ section.word_count }} words)</summary>
+              <div class="section-full-text-content">{{ section.full_text }}</div>
+            </details>
+            {% endif %}
             {% elif section.word_count == 0 %}
             <p class="section-preview muted">(content in subsections below)</p>
             {% endif %}
