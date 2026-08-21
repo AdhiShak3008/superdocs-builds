@@ -204,15 +204,32 @@ def _clean_title(text: str) -> str:
         t = re.sub(pattern, replacement, t, flags=re.IGNORECASE)
 
     # Step 3: truncate body text absorbed into heading line.
-    # Keep only the heading portion: Roman/alpha prefix + CAPS words.
-    # Stop when we hit mixed-case body text (e.g. "The platform is...")
+    # For Roman headings: "III. SYSTEM ARCHITECTURE The platform..." → keep CAPS words
     m_roman = re.match(r'^([IVX]+\.\s+[A-Z][A-Z\s\-]+?)(?=\s+[A-Z][a-z]|$)', t)
-    m_alpha = re.match(r'^([A-Z]\.\s+[A-Z][A-Z\s\-]+?)(?=\s+[A-Z][a-z]|$)', t)
-    m = m_roman or m_alpha
-    if m:
-        candidate = m.group(1).strip()
+    if m_roman:
+        candidate = m_roman.group(1).strip()
         if 2 <= len(candidate.split()) <= 8:
             t = candidate
+
+    # For alpha headings: "D. DocPilot effective ranking..." → keep title-case words
+    # Alpha heading words start with uppercase; body text transitions to lowercase
+    m_alpha = re.match(r'^([A-Z]\.\s+)', t)
+    if m_alpha and not m_roman:
+        prefix = m_alpha.group(1)
+        rest = t[len(prefix):]
+        # Keep words that are capitalized (title-case heading words)
+        # Stop at the first clearly lowercase word that isn't a short connector
+        heading_words = []
+        for word in rest.split():
+            if word[0].isupper() or word in ('and', 'of', 'the', 'for', 'in', 'on', 'to', 'with'):
+                heading_words.append(word)
+            else:
+                break
+            # Stop after 5 heading words max
+            if len(heading_words) >= 5:
+                break
+        if heading_words:
+            t = prefix + " ".join(heading_words)
 
     return " ".join(t.split())
 
@@ -453,13 +470,13 @@ class FlowMapper:
     def _is_bibliographic(self, text: str) -> bool:
         """
         Detect bibliographic reference entries that look like headings.
-        Patterns: "V. Cormack, C. and..." / "L. A. Clarke and S. Buettcher"
 
         Critical: must NOT reject legitimate alpha subsections like
         "A. Platform Overview" or "B. PilotCore Framework".
 
-        Distinction: subsections are short (2-6 words, no commas after surname).
-        Bibliography entries are long, have commas, quotation marks, years.
+        Distinction: subsections have a known structural pattern.
+        Bibliography entries are names, have commas, quotation marks, years,
+        or are very short (just an author initial + surname).
         """
         t = text.strip()
 
@@ -472,13 +489,37 @@ class FlowMapper:
             return True
 
         # Pattern: "X. Surname, Initial." — has a comma after the first word
-        # e.g. "V. Cormack, C." but NOT "A. Platform Overview"
         if re.match(r'^[A-Z]\.\s+[A-Z][a-z]+\s*,', t):
             return True
 
-        # Long text starting with single letter + period → likely bibliographic
-        # Subsections are typically ≤ 6 words
-        if re.match(r'^[A-Z]\.\s+', t) and len(t.split()) > 8:
+        # Pattern: "X. Surname" (2-3 words, looks like an author name)
+        words = t.split()
+        if (len(words) == 2 and re.match(r'^[A-Z]\.\s+[A-Z][a-z]+$', t)):
+            surname = words[1].lower()
+            # Known heading/section words are NOT surnames
+            _NOT_SURNAME = {
+                "overview", "framework", "model", "pipeline", "analysis",
+                "setup", "metrics", "results", "evaluation", "rationale",
+                "decisions", "trade-offs", "limitations", "work", "ingestion",
+                "extraction", "construction", "generation", "architecture",
+                "implementation", "discussion", "introduction", "availability",
+                "background", "related", "motivation", "summary", "design",
+                "conclusion", "method", "methods", "system", "approach",
+                "docpilot", "tracepilot", "gaugepilot", "pilotcore",
+            }
+            if surname not in _NOT_SURNAME and len(surname) <= 8:
+                return True
+
+        # "et al" → bibliographic
+        if "et al" in t.lower():
+            return True
+
+        # "and" at end or mid with initials → multi-author reference
+        if re.match(r'^[A-Z]\.\s+\S+\s+and\b', t):
+            return True
+
+        # "G. V. Cormack" — multiple initials
+        if re.match(r'^[A-Z]\.\s+[A-Z]\.\s+[A-Z]', t):
             return True
 
         return False

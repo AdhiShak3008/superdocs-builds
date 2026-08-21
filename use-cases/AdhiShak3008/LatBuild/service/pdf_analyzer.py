@@ -665,7 +665,7 @@ class PDFAnalyzer:
                 is_hdg_line = bool(
                     _ROMAN_HEADING_RE.match(line_text) or
                     _ROMAN_HEADING_RE.match(tn) or
-                    _ALPHA_HEADING_RE.match(line_text) or
+                    (_ALPHA_HEADING_RE.match(line_text) and len(line_text.split()) <= 6) or
                     _KEYWORD_RE.match(tn)
                 )
                 if is_hdg_line and result and result[-1] is not None:
@@ -677,10 +677,8 @@ class PDFAnalyzer:
 
     def _split_line_at_embedded_heading(self, line: list) -> list:
         """
-        If a line contains a Roman-numeral heading token after body text,
-        split the line at that point. E.g.:
-          ["retrieval", "and", "reranking", "VI.", "D", "ISCUSSION"]
-          → [["retrieval", "and", "reranking"], ["VI.", "D", "ISCUSSION"]]
+        If a line contains a Roman-numeral or alpha-subsection heading token
+        after body text, split the line at that point.
         """
         if len(line) <= 1:
             return [line]
@@ -691,10 +689,16 @@ class PDFAnalyzer:
             remaining = sorted_words[i:]
             text_from_here = " ".join(w["text"] for w in remaining)
             tn = re.sub(r'(?<=[A-Z]) (?=[A-Z])', '', text_from_here)
-            if _ROMAN_HEADING_RE.match(text_from_here) or _ROMAN_HEADING_RE.match(tn):
+
+            is_heading_start = bool(
+                _ROMAN_HEADING_RE.match(text_from_here) or
+                _ROMAN_HEADING_RE.match(tn) or
+                (_ALPHA_HEADING_RE.match(text_from_here) and len(text_from_here.split()) <= 6)
+            )
+
+            if is_heading_start:
                 before = sorted_words[:i]
                 after  = sorted_words[i:]
-                # Only split if there's meaningful text before
                 if before and " ".join(w["text"] for w in before).strip():
                     return [before, after]
 
