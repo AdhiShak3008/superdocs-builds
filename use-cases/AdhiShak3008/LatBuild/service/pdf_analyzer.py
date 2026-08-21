@@ -174,7 +174,7 @@ _ROMAN_HEADING_RE = re.compile(r'^' + _ROMAN + r'\.\s+\S', re.IGNORECASE)
 _ALPHA_HEADING_RE = re.compile(r'^[A-Z]\.\s+\S')
 # Keywords line
 _KEYWORD_RE = re.compile(
-    r'^(index\s+terms|keywords?|key\s+words)\s*[\u2014\-:—]',
+    r'^(index\s+terms|keywords?|key\s+words)\s*[\u2014:—]',
     re.IGNORECASE
 )
 
@@ -475,7 +475,20 @@ class PDFAnalyzer:
         for col_idx, col_words in enumerate(col_word_lists):
             if not col_words:
                 continue
-            lines = self._group_words_into_lines(col_words)
+
+            # Filter out figure caption words (small font, clearly captions)
+            # These contaminate heading lines when figures overlap text zones
+            body_size = grammar.body_fontsize
+            col_words_main = [
+                w for w in col_words
+                if float(w.get("size", body_size)) >= body_size * 0.75
+            ]
+            col_words_capts = [
+                w for w in col_words
+                if float(w.get("size", body_size)) < body_size * 0.75
+            ]
+
+            lines = self._group_words_into_lines(col_words_main)
             # Split lines at heading boundaries BEFORE paragraph grouping
             lines = self._split_lines_on_headings(lines, grammar)
             paragraphs = self._group_lines_into_paragraphs(lines)
@@ -637,24 +650,55 @@ class PDFAnalyzer:
     def _split_lines_on_headings(self, lines: list, grammar: DocumentGrammar) -> list:
         """
         Insert None sentinels before any line whose text starts with a
-        heading pattern. This forces a paragraph break before headings
-        that have no visual gap from preceding body text — which is
-        common in IEEE PDFs where headings run tight against body text.
+        heading pattern, and split lines that contain an embedded heading
+        mid-text (e.g. "body text VI. DISCUSSION").
         """
         result = []
         for line in lines:
-            line_text = " ".join(w["text"] for w in line).strip()
-            tn = re.sub(r'(?<=[A-Z]) (?=[A-Z])', '', line_text)
-            is_hdg_line = bool(
-                _ROMAN_HEADING_RE.match(line_text) or
-                _ROMAN_HEADING_RE.match(tn) or
-                _ALPHA_HEADING_RE.match(line_text) or
-                _KEYWORD_RE.match(tn)
-            )
-            if is_hdg_line and result and result[-1] is not None:
-                result.append(None)   # force paragraph break
-            result.append(line)
+            # Split line at embedded Roman-numeral heading mid-text
+            sub_lines = self._split_line_at_embedded_heading(line)
+            for sub in sub_lines:
+                if not sub:
+                    continue
+                line_text = " ".join(w["text"] for w in sub).strip()
+                tn = re.sub(r'(?<=[A-Z]) (?=[A-Z])', '', line_text)
+                is_hdg_line = bool(
+                    _ROMAN_HEADING_RE.match(line_text) or
+                    _ROMAN_HEADING_RE.match(tn) or
+                    _ALPHA_HEADING_RE.match(line_text) or
+                    _KEYWORD_RE.match(tn)
+                )
+                if is_hdg_line and result and result[-1] is not None:
+                    result.append(None)   # force paragraph break before heading
+                result.append(sub)
+                if is_hdg_line:
+                    result.append(None)   # force paragraph break after heading too
         return result
+
+    def _split_line_at_embedded_heading(self, line: list) -> list:
+        """
+        If a line contains a Roman-numeral heading token after body text,
+        split the line at that point. E.g.:
+          ["retrieval", "and", "reranking", "VI.", "D", "ISCUSSION"]
+          → [["retrieval", "and", "reranking"], ["VI.", "D", "ISCUSSION"]]
+        """
+        if len(line) <= 1:
+            return [line]
+
+        sorted_words = sorted(line, key=lambda w: w["x0"])
+
+        for i in range(1, len(sorted_words)):
+            remaining = sorted_words[i:]
+            text_from_here = " ".join(w["text"] for w in remaining)
+            tn = re.sub(r'(?<=[A-Z]) (?=[A-Z])', '', text_from_here)
+            if _ROMAN_HEADING_RE.match(text_from_here) or _ROMAN_HEADING_RE.match(tn):
+                before = sorted_words[:i]
+                after  = sorted_words[i:]
+                # Only split if there's meaningful text before
+                if before and " ".join(w["text"] for w in before).strip():
+                    return [before, after]
+
+        return [sorted_words]
 
     def _group_words_into_lines(self, words: list, tolerance: float = 3.0) -> list:
         """Group words with approximately the same top coordinate into lines."""
@@ -741,28 +785,28 @@ class PDFAnalyzer:
         if _ROMAN_HEADING_RE.match(t) or _ROMAN_HEADING_RE.match(tn):
             return True
 
-        # IEEE alpha subsection: "A.", "B.", "C." ...
-        if _ALPHA_HEADING_RE.match(t):
+        # IEEE alpha subsection: "A.", "B.", "C." followed by a word.
+        # MUST be short (≤ 8 words) to avoid matching reference entries like
+        # "L. A. Clarke and S. Buettcher, ..."
+        if _ALPHA_HEADING_RE.match(t) and len(t.split()) <= 8:
             return True
 
         # Keywords / Index Terms line
         if _KEYWORD_RE.match(tn):
             return True
 
-        # Exact known heading
-        if tl.rstrip('.:—\u2014 ') in KNOWN_HEADINGS:
+        # Exact known heading — use exact match only, not prefix,
+        # to avoid "keyword-based retrieval..." matching "keyword"
+        bare = tl.rstrip('.:—\u2014 ')
+        if bare in KNOWN_HEADINGS:
             return True
-
-        # Starts with known heading word
-        for kh in KNOWN_HEADINGS:
-            if tl.startswith(kh + " ") or tl.startswith(kh + "\n"):
-                return True
 
         # Larger than body AND bold
         if fontsize > grammar.body_fontsize + 1.5 and is_bold:
             return True
 
-        # ALL CAPS 2-8 word block
+        # ALL CAPS 2-8 word block (handles "PROJECT AVAILABILITY",
+        # "P ROJECT A VAILABILITY" after normalisation)
         tn_nsp = tn.replace(" ", "")
         if tn_nsp.isupper() and 2 <= len(tn.split()) <= 8:
             return True

@@ -213,7 +213,10 @@ def api_upload():
         "page_count": doc.page_count,
         "sections": [
             {
-                "name": s.name,
+                "name": s.title,
+                "id": s.id,
+                "level": s.level,
+                "parent_id": s.parent_id,
                 "pages": s.pages,
                 "word_count": s.word_count,
                 "is_editable": s.is_editable,
@@ -237,7 +240,10 @@ def api_sections():
     return jsonify({
         "sections": [
             {
-                "name": s.name,
+                "name": s.title,
+                "id": s.id,
+                "level": s.level,
+                "parent_id": s.parent_id,
                 "pages": s.pages,
                 "word_count": s.word_count,
             }
@@ -290,7 +296,7 @@ def api_transform():
     def start_job(section):
         extracted = extract_section(section, fm.grammar)
         full_instruction = build_superdocs_instruction(instruction, extracted)
-        docx_bytes = prose_to_docx(extracted.clean_text, title=section.name)
+        docx_bytes = prose_to_docx(extracted.clean_text, title=section.title)
         conv_session_id = f"latbuild-{uuid.uuid4().hex[:12]}"
 
         try:
@@ -298,7 +304,7 @@ def api_transform():
             job_id = sd.start_transformation(
                 conv_session_id, upload_result["html"], full_instruction
             )
-            return section.name, {
+            return section.title, {
                 "session_id": conv_session_id,
                 "job_id": job_id,
                 "status": "in_progress",
@@ -309,7 +315,7 @@ def api_transform():
                 "error": None,
             }
         except sd.SuperDocsError as e:
-            return section.name, {
+            return section.title, {
                 "session_id": conv_session_id,
                 "job_id": None,
                 "status": "failed",
@@ -530,7 +536,7 @@ def api_apply():
             original_path=state["pdf_path"],
             modified_path=output_path,
             reflow_result=merged_result,
-            selected_section_names=[e[0].name for e in edits],
+            selected_section_names=[e[0].title for e in edits],
             non_content=fm.non_content,
         )
         state["fidelity_report"] = fidelity.as_dict()
@@ -539,7 +545,7 @@ def api_apply():
         state["fidelity_report"] = {
             "pass": None,
             "summary": f"Fidelity check could not complete: {str(e)}",
-            "selected_sections": [e[0].name for e in edits],
+            "selected_sections": [e[0].title for e in edits],
             "pages_total": 0,
             "pages_modified": merged_affected,
             "non_target_pages_changed": [],

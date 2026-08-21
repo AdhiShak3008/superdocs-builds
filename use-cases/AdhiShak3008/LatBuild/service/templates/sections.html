@@ -28,10 +28,10 @@
 
       <div class="section-list" id="section-list">
         {% for section in sections %}
-        <label class="section-item" data-name="{{ section.name }}">
-          <input type="checkbox" class="section-checkbox" value="{{ section.name }}">
+        <label class="section-item{% if section.level == 2 %} section-item-sub{% endif %}" data-name="{{ section.title }}">
+          <input type="checkbox" class="section-checkbox" value="{{ section.title }}">
           <div class="section-info">
-            <span class="section-name">{{ section.name }}</span>
+            <span class="section-name">{% if section.level == 2 %}&nbsp;&nbsp;&nbsp;&nbsp;{% endif %}{{ section.title }}</span>
             <span class="section-meta">
               {% if section.pages | length == 1 %}
                 Page {{ section.pages[0] }}

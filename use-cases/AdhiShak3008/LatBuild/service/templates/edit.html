@@ -21,7 +21,7 @@
       <div class="selected-section-list">
         {% for section in selected_sections %}
         <div class="selected-section-tag">
-          {{ section.name }}
+          {{ section.title }}
           <span class="muted">(~{{ section.word_count }} words)</span>
         </div>
         {% endfor %}
@@ -63,7 +63,7 @@
   <script src="/static/app.js"></script>
   <script>
     window.EDIT_STATE = {
-      selectedSections: {{ selected_sections | map(attribute='name') | list | tojson }},
+      selectedSections: {{ selected_sections | map(attribute='title') | list | tojson }},
     };
     initEditPage();
   </script>

@@ -252,41 +252,49 @@ class FlowMapper:
         if not all_blocks:
             return []
 
-        # --- Step 1: find all heading blocks and their levels ---
-        heading_indices = [
+        # --- Step 1: find candidate heading blocks and their levels ---
+        candidates = [
             (i, _heading_level(b.text))
             for i, b in enumerate(all_blocks)
             if b.is_heading and _heading_level(b.text) > 0
         ]
 
-        if not heading_indices:
-            # No headings — single section
+        if not candidates:
             return [Section(
                 id="document", title="Document", level=1,
-                parent_id=None,
-                heading_block=None,
-                content_blocks=all_blocks,
-                flow_regions=[],
+                parent_id=None, heading_block=None,
+                content_blocks=all_blocks, flow_regions=[],
+                is_editable=True,
+            )]
+
+        # --- Step 2: VALIDATE heading candidates ---
+        # Apply document-structure constraints to reject false positives.
+        heading_indices = self._validate_heading_candidates(candidates, all_blocks)
+
+        if not heading_indices:
+            return [Section(
+                id="document", title="Document", level=1,
+                parent_id=None, heading_block=None,
+                content_blocks=all_blocks, flow_regions=[],
                 is_editable=True,
             )]
 
         sections: List[Section] = []
 
-        # --- Step 2: preamble (blocks before first heading) ---
+        # --- Step 3: preamble (blocks before first heading) ---
         first_h_idx = heading_indices[0][0]
         if first_h_idx > 0:
             pre = all_blocks[:first_h_idx]
             sections.append(Section(
                 id="preamble", title="Title / Preamble", level=1,
-                parent_id=None,
-                heading_block=None,
-                content_blocks=pre,
-                flow_regions=[],
+                parent_id=None, heading_block=None,
+                content_blocks=pre, flow_regions=[],
                 is_editable=False,
             ))
 
-        # --- Step 3: build each section from heading to next heading ---
+        # --- Step 4: build sections, respecting REFERENCES terminal ---
         current_l1_id: Optional[str] = None
+        in_references = False
 
         for pos, (h_idx, level) in enumerate(heading_indices):
             hblock = all_blocks[h_idx]
@@ -303,28 +311,35 @@ class FlowMapper:
                 if not self._is_caption(b)
             ]
 
+            # Check if this is the REFERENCES heading
+            tl = title.lower().rstrip('.:—\u2014 ')
+            if tl in ("references", "bibliography"):
+                in_references = True
+
+            # Once in REFERENCES, everything is non-editable and no subsections
+            if in_references:
+                if tl not in ("references", "bibliography"):
+                    # This is bibliography content, NOT a real section.
+                    # Absorb it into the REFERENCES section.
+                    continue
+
             # Determine parent
             parent_id: Optional[str] = None
             if level == 2:
                 parent_id = current_l1_id
             elif level == 1:
-                current_l1_id = None  # will be set below
-
-            # Keywords line: the entire text is in the heading block
-            # Mark as non-editable metadata; word count from heading text
-            tl_check = title.lower()
-            if any(kw in tl_check for kw in ["keyword", "index term"]):
-                editable = False
+                current_l1_id = None
 
             sec_id = _make_id(title, parent_id)
 
-            tl = title.lower().rstrip('.:—\u2014 ')
-            editable = tl not in NON_EDITABLE
+            editable = tl not in NON_EDITABLE and not in_references
+
+            # Keywords check
+            if any(kw in tl for kw in ["keyword", "index term"]):
+                editable = False
 
             s = Section(
-                id=sec_id,
-                title=title,
-                level=level,
+                id=sec_id, title=title, level=level,
                 parent_id=parent_id,
                 heading_block=hblock,
                 content_blocks=content,
@@ -336,7 +351,155 @@ class FlowMapper:
             if level == 1:
                 current_l1_id = sec_id
 
+        # If REFERENCES was detected, absorb all post-REFERENCES content into it
+        if in_references:
+            refs_section = next((s for s in sections
+                                 if s.title.lower().rstrip('.:—\u2014 ') in
+                                 ("references", "bibliography")), None)
+            if refs_section:
+                refs_idx = next(i for i, (idx, _) in enumerate(heading_indices)
+                                if all_blocks[idx] == refs_section.heading_block)
+                refs_h_idx = heading_indices[refs_idx][0]
+                # All blocks after REFERENCES heading belong to it
+                refs_section.content_blocks = [
+                    b for b in all_blocks[refs_h_idx + 1:]
+                    if not self._is_caption(b)
+                ]
+
         return sections
+
+    # ------------------------------------------------------------------
+    # Heading validation layer
+    # ------------------------------------------------------------------
+
+    def _validate_heading_candidates(
+        self,
+        candidates: List[tuple],
+        all_blocks: List[TextBlock],
+    ) -> List[tuple]:
+        """
+        Filter heading candidates using document-structure constraints.
+
+        Rules enforced:
+        1. Roman numerals must form a plausible monotone sequence.
+           A candidate that goes backwards (e.g. IV. after V.) is rejected
+           unless it's actually a lower number (restart).
+        2. Bibliographic patterns ("V. Cormack, C.", "L. A. Clarke, ...")
+           are rejected — they look like "Author Initial. Name".
+        3. Alpha subsection candidates require an active Roman parent.
+        4. "keyword-based ..." body text is rejected.
+        5. After REFERENCES heading, all subsequent candidates are rejected.
+        """
+        if not candidates:
+            return []
+
+        validated = []
+        max_roman_seen = 0
+        references_seen = False
+        has_active_l1_parent = False
+
+        for (block_idx, level) in candidates:
+            block = all_blocks[block_idx]
+            title_raw = block.text.strip()
+            title_clean = _clean_title(title_raw)
+            tl = title_clean.lower().rstrip('.:—\u2014 ')
+
+            # Rule 5: after REFERENCES, reject everything
+            if references_seen:
+                continue
+            if tl in ("references", "bibliography"):
+                references_seen = True
+                validated.append((block_idx, level))
+                continue
+
+            # Rule 2: reject bibliographic patterns
+            # Pattern: "X. Surname," where X is a single letter
+            if self._is_bibliographic(title_raw):
+                continue
+
+            # Rule 4: reject body text starting with a known word
+            # "keyword-based retrieval..." is body text
+            if level == 1 and len(title_raw.split()) > 8:
+                # Long text that matched heading — likely false positive
+                continue
+
+            # Rule 1: Roman numeral monotonicity
+            if level == 1:
+                roman_num = self._extract_roman_number(title_clean)
+                if roman_num is not None:
+                    # Allow forward progression or same number
+                    if roman_num >= max_roman_seen:
+                        max_roman_seen = roman_num
+                    elif roman_num < max_roman_seen:
+                        # Going backwards — reject unless it's I (restart)
+                        if roman_num != 1:
+                            continue
+                        max_roman_seen = roman_num
+
+            # Rule 3: alpha subsections need an active L1 parent
+            if level == 2:
+                if not has_active_l1_parent:
+                    # No parent → reject unless this is a known top-level
+                    if tl not in KNOWN_HEADINGS:
+                        continue
+
+            validated.append((block_idx, level))
+
+            if level == 1:
+                has_active_l1_parent = True
+
+        return validated
+
+    def _is_bibliographic(self, text: str) -> bool:
+        """
+        Detect bibliographic reference entries that look like headings.
+        Patterns: "V. Cormack, C. and..." / "L. A. Clarke and S. Buettcher"
+
+        Critical: must NOT reject legitimate alpha subsections like
+        "A. Platform Overview" or "B. PilotCore Framework".
+
+        Distinction: subsections are short (2-6 words, no commas after surname).
+        Bibliography entries are long, have commas, quotation marks, years.
+        """
+        t = text.strip()
+
+        # Contains quotation marks → bibliographic (paper titles)
+        if '"' in t or '\u201c' in t or '\u201d' in t:
+            return True
+
+        # Contains a year in parentheses or after comma → bibliographic
+        if re.search(r'[\(,]\s*\d{4}', t):
+            return True
+
+        # Pattern: "X. Surname, Initial." — has a comma after the first word
+        # e.g. "V. Cormack, C." but NOT "A. Platform Overview"
+        if re.match(r'^[A-Z]\.\s+[A-Z][a-z]+\s*,', t):
+            return True
+
+        # Long text starting with single letter + period → likely bibliographic
+        # Subsections are typically ≤ 6 words
+        if re.match(r'^[A-Z]\.\s+', t) and len(t.split()) > 8:
+            return True
+
+        return False
+
+    def _extract_roman_number(self, title: str) -> Optional[int]:
+        """Extract the Roman numeral from a title like 'III. SYSTEM ARCHITECTURE'."""
+        m = re.match(r'^([IVX]+)\.', title)
+        if not m:
+            return None
+        roman = m.group(1)
+        roman_map = {'I': 1, 'V': 5, 'X': 10}
+        total = 0
+        prev = 0
+        for ch in reversed(roman):
+            val = roman_map.get(ch, 0)
+            if val < prev:
+                total -= val
+            else:
+                total += val
+            prev = val
+        return total
 
     def _is_caption(self, block: TextBlock) -> bool:
         return bool(re.match(
