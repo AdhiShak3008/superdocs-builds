@@ -63,7 +63,9 @@ class Section:
 
     @property
     def full_text(self) -> str:
-        return "\n\n".join(b.text for b in self.content_blocks).strip()
+        from text_normalizer import normalize_section_text
+        raw = "\n\n".join(b.text for b in self.content_blocks).strip()
+        return normalize_section_text(raw)
 
     @property
     def word_count(self) -> int:
