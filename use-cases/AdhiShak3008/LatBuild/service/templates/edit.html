@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Edit Instruction — LatBuild</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <a href="/sections" class="back-link">← Back to sections</a>
+      <h1>Enter Editing Instruction</h1>
+      <p class="subtitle">{{ selected_sections | length }} section(s) selected</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="card">
+      <h2>Selected Sections</h2>
+      <div class="selected-section-list">
+        {% for section in selected_sections %}
+        <div class="selected-section-tag">
+          {{ section.name }}
+          <span class="muted">(~{{ section.word_count }} words)</span>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>SuperDocs Instruction</h2>
+      <p>Describe what you want SuperDocs to do to the selected sections. One instruction applies to all selected sections.</p>
+
+      <form id="edit-form">
+        <textarea
+          id="instruction-input"
+          rows="4"
+          placeholder="e.g. Rewrite to be more concise and emphasize the experimental contribution. Preserve all citations and technical terminology."
+          required
+        >{{ instruction }}</textarea>
+
+        <div class="instruction-tips">
+          <p class="muted">Tips:</p>
+          <ul class="muted">
+            <li>SuperDocs will preserve all citation markers (e.g. [1], [2]) automatically.</li>
+            <li>You can ask for tone changes, conciseness, improved clarity, or restructuring.</li>
+            <li>The layout engine handles length changes — your text can be shorter or longer.</li>
+          </ul>
+        </div>
+
+        <div id="transform-status" class="status-msg"></div>
+
+        <div class="action-row">
+          <button type="submit" class="btn btn-primary btn-large" id="start-btn">
+            Send to SuperDocs →
+          </button>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+  <script>
+    window.EDIT_STATE = {
+      selectedSections: {{ selected_sections | map(attribute='name') | list | tojson }},
+    };
+    initEditPage();
+  </script>
+</body>
+</html>

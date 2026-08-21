@@ -1,0 +1,162 @@
+"""
+conftest.py
+Shared fixtures for LatBuild tests.
+All tests run without a live PDF or SuperDocs API key.
+"""
+
+import pytest
+from pdf_analyzer import (
+    BBox, TextBlock, NonContentElement, ColumnRegion,
+    DocumentGrammar, AnalyzedDocument, PageLayout
+)
+from flow_mapper import Section, FlowRegion, DocumentFlowMap
+
+
+# ---------------------------------------------------------------------------
+# Grammar fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def ieee_grammar():
+    """Realistic DocumentGrammar for a two-column IEEE paper."""
+    return DocumentGrammar(
+        page_width=612.0,
+        page_height=792.0,
+        margin_top=54.0,
+        margin_bottom=54.0,
+        margin_left=54.0,
+        margin_right=54.0,
+        column_count=2,
+        column_regions=[
+            ColumnRegion(index=0, x0=54.0, x1=288.0, width=234.0),
+            ColumnRegion(index=1, x0=324.0, x1=558.0, width=234.0),
+        ],
+        column_gap=36.0,
+        body_fontname="Times-Roman",
+        body_fontsize=9.0,
+        body_line_height=11.0,
+        paragraph_spacing=8.8,
+        heading_styles={
+            "h1": {"fontname": "Times-Bold", "fontsize": 10.0, "is_bold": True},
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# TextBlock factory
+# ---------------------------------------------------------------------------
+
+def make_block(text, page=1, col=0, y0=700.0, y1=650.0, fontsize=9.0,
+               fontname="Times-Roman", is_bold=False, is_heading=False, ro=0):
+    return TextBlock(
+        text=text,
+        bbox=BBox(x0=54.0, y0=y0, x1=288.0, y1=y1),
+        page=page,
+        column=col,
+        fontname=fontname,
+        fontsize=fontsize,
+        is_bold=is_bold,
+        is_heading=is_heading,
+        reading_order=ro,
+        line_height=11.0,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def abstract_section(ieee_grammar):
+    heading = make_block("Abstract", y0=710.0, y1=700.0, fontname="Times-Bold",
+                         is_bold=True, is_heading=True, ro=0)
+    content = make_block(
+        "We present a novel framework for mitochondrial dynamics analysis. "
+        "Our method achieves 94.2% accuracy (p < 0.001, n=120) on three benchmarks. "
+        "The system processes documents in under 2 seconds on standard hardware.",
+        y0=698.0, y1=640.0, ro=1
+    )
+    region = FlowRegion(
+        page=1, column=0,
+        bbox=BBox(x0=54.0, y0=698.0, x1=288.0, y1=640.0),
+        column_width=234.0,
+    )
+    return Section(
+        name="Abstract",
+        heading_block=heading,
+        content_blocks=[content],
+        flow_regions=[region],
+        is_editable=True,
+    )
+
+
+@pytest.fixture
+def methodology_section(ieee_grammar):
+    heading = make_block("III. METHODOLOGY", page=3, col=0, y0=710.0, y1=698.0,
+                         fontname="Times-Bold", is_bold=True, is_heading=True, ro=10)
+    blocks = [
+        make_block("We collected 500 samples from three independent datasets.",
+                   page=3, col=0, y0=695.0, y1=660.0, ro=11),
+        make_block("Each sample was processed using our pipeline described in [3].",
+                   page=3, col=1, y0=710.0, y1=675.0, ro=12),
+        make_block("Statistical analysis was performed with ANOVA (F(2,497)=14.3, p<0.001).",
+                   page=4, col=0, y0=710.0, y1=670.0, ro=13),
+    ]
+    regions = [
+        FlowRegion(page=3, column=0, bbox=BBox(54, 695, 288, 660), column_width=234.0),
+        FlowRegion(page=3, column=1, bbox=BBox(324, 710, 558, 675), column_width=234.0),
+        FlowRegion(page=4, column=0, bbox=BBox(54, 710, 288, 670), column_width=234.0),
+    ]
+    return Section(
+        name="III. METHODOLOGY",
+        heading_block=heading,
+        content_blocks=blocks,
+        flow_regions=regions,
+        is_editable=True,
+    )
+
+
+@pytest.fixture
+def references_section():
+    heading = make_block("References", page=11, col=0, y0=710.0, y1=698.0,
+                         is_heading=True, ro=90)
+    content = make_block("[1] Smith, J. et al. Nature 2020.", page=11, col=0,
+                         y0=695.0, y1=680.0, ro=91)
+    return Section(
+        name="References",
+        heading_block=heading,
+        content_blocks=[content],
+        flow_regions=[
+            FlowRegion(page=11, column=0, bbox=BBox(54, 695, 288, 680), column_width=234.0)
+        ],
+        is_editable=False,
+    )
+
+
+@pytest.fixture
+def simple_flow_map(ieee_grammar, abstract_section, methodology_section, references_section):
+    all_blocks = (
+        ([abstract_section.heading_block] + abstract_section.content_blocks) +
+        ([methodology_section.heading_block] + methodology_section.content_blocks) +
+        ([references_section.heading_block] + references_section.content_blocks)
+    )
+    return DocumentFlowMap(
+        grammar=ieee_grammar,
+        sections=[abstract_section, methodology_section, references_section],
+        all_blocks=all_blocks,
+        non_content=[],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Non-content fixture
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def figure_on_page3():
+    return NonContentElement(
+        type="image",
+        page=3,
+        bbox=BBox(x0=324.0, y0=400.0, x1=558.0, y1=300.0),
+        anchor="absolute",
+    )
