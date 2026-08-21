@@ -10,7 +10,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'service'))
 
 from pdf_analyzer import BBox, TextBlock, ColumnRegion
-from flow_mapper import FlowMapper, Section, FlowRegion, DocumentFlowMap, NON_EDITABLE_SECTIONS
+from flow_mapper import FlowMapper, Section, FlowRegion, DocumentFlowMap, NON_EDITABLE
 from conftest import make_block
 
 
@@ -33,9 +33,9 @@ class TestSectionDetection:
             make_block("Parkinson's disease affects 1% of adults.", ro=3),
         ]
         sections = mapper._detect_sections(blocks, ieee_grammar)
-        section_names = [s.name for s in sections]
-        assert any("Abstract" in n for n in section_names)
-        assert any("Introduction" in n or "I." in n for n in section_names)
+        titles = [s.title for s in sections]
+        assert any("Abstract" in t for t in titles)
+        assert any("Introduction" in t or "I." in t for t in titles)
 
     def test_content_assigned_to_correct_section(self, mapper, ieee_grammar):
         blocks = [
@@ -45,7 +45,7 @@ class TestSectionDetection:
             make_block("Introduction body text.", ro=3),
         ]
         sections = mapper._detect_sections(blocks, ieee_grammar)
-        abstract = next(s for s in sections if "Abstract" in s.name)
+        abstract = next(s for s in sections if "Abstract" in s.title)
         assert len(abstract.content_blocks) == 1
         assert "Abstract body text" in abstract.content_blocks[0].text
 
@@ -55,7 +55,7 @@ class TestSectionDetection:
             make_block("[1] Smith et al. 2020.", ro=1),
         ]
         sections = mapper._detect_sections(blocks, ieee_grammar)
-        refs = next((s for s in sections if "reference" in s.name.lower()), None)
+        refs = next((s for s in sections if "reference" in s.title.lower()), None)
         assert refs is not None
         assert not refs.is_editable
 
@@ -86,7 +86,7 @@ class TestSectionDetection:
             make_block("Table 1. Results.", ro=3),
         ]
         sections = mapper._detect_sections(blocks, ieee_grammar)
-        abstract = next(s for s in sections if "Abstract" in s.name)
+        abstract = next(s for s in sections if "Abstract" in s.title)
         texts = [b.text for b in abstract.content_blocks]
         assert not any("Fig." in t or "Table" in t for t in texts)
 
@@ -103,7 +103,6 @@ class TestFlowRegionBuilding:
 
     def test_multi_page_section_multiple_regions(self, mapper, ieee_grammar, methodology_section):
         regions = mapper._build_flow_regions(methodology_section, ieee_grammar)
-        # 3 blocks on different pages/columns → 3 regions
         assert len(regions) == 3
 
     def test_flow_region_page_correct(self, mapper, ieee_grammar, abstract_section):
@@ -113,7 +112,7 @@ class TestFlowRegionBuilding:
     def test_empty_section_returns_single_default_region(self, mapper, ieee_grammar):
         heading = make_block("II. RESULTS", is_heading=True, ro=5)
         section = Section(
-            name="II. RESULTS",
+            id="sec_ii_results", title="II. RESULTS", level=1, parent_id=None,
             heading_block=heading,
             content_blocks=[],
             flow_regions=[],
@@ -138,21 +137,53 @@ class TestDocumentFlowMap:
     def test_get_section_by_name(self, simple_flow_map, abstract_section):
         result = simple_flow_map.get_section("Abstract")
         assert result is not None
-        assert result.name == "Abstract"
+        assert result.title == "Abstract"
 
     def test_get_section_missing_returns_none(self, simple_flow_map):
         assert simple_flow_map.get_section("Nonexistent Section") is None
 
     def test_editable_sections_excludes_references(self, simple_flow_map):
         editable = simple_flow_map.editable_sections()
-        names = [s.name for s in editable]
-        assert all("reference" not in n.lower() for n in names)
+        titles = [s.title for s in editable]
+        assert all("reference" not in t.lower() for t in titles)
 
     def test_sections_after(self, simple_flow_map, abstract_section, methodology_section):
         after = simple_flow_map.sections_after(abstract_section)
-        names = [s.name for s in after]
-        assert "III. METHODOLOGY" in names
+        titles = [s.title for s in after]
+        assert "III. METHODOLOGY" in titles
 
     def test_sections_after_last_section_is_empty(self, simple_flow_map, references_section):
         after = simple_flow_map.sections_after(references_section)
         assert after == []
+
+    def test_hierarchy_level_detection(self, mapper, ieee_grammar):
+        """Level-1 sections come before level-2 subsections."""
+        blocks = [
+            make_block("I. INTRODUCTION", is_heading=True, ro=0),
+            make_block("Body text.", ro=1),
+            make_block("A. Background", is_heading=True, ro=2),
+            make_block("Subsection text.", ro=3),
+        ]
+        sections = mapper._detect_sections(blocks, ieee_grammar)
+        intro = next(s for s in sections if "I." in s.title)
+        sub = next(s for s in sections if "A." in s.title)
+        assert intro.level == 1
+        assert sub.level == 2
+        assert sub.parent_id == intro.id
+
+    def test_children_of(self, mapper, ieee_grammar):
+        """children_of returns all level-2 sections under a level-1 parent."""
+        blocks = [
+            make_block("I. INTRODUCTION", is_heading=True, ro=0),
+            make_block("Body.", ro=1),
+            make_block("A. Background", is_heading=True, ro=2),
+            make_block("Sub text.", ro=3),
+            make_block("B. Related", is_heading=True, ro=4),
+            make_block("More text.", ro=5),
+        ]
+        sections = mapper._detect_sections(blocks, ieee_grammar)
+        fm = DocumentFlowMap(grammar=ieee_grammar, sections=sections,
+                             all_blocks=blocks, non_content=[])
+        intro = next(s for s in sections if "I." in s.title)
+        children = fm.children_of(intro)
+        assert len(children) == 2

@@ -30,6 +30,7 @@ def base_grammar():
             ColumnRegion(0, 54.0, 288.0, 234.0),
             ColumnRegion(1, 324.0, 558.0, 234.0),
         ],
+        split_x=306.0,
         column_gap=36.0,
         body_fontname="Times-Roman",
         body_fontsize=9.0,
@@ -47,39 +48,32 @@ class TestColumnDetection:
 
     def test_two_column_detection(self, analyzer):
         """Words clustered in two groups should produce two columns."""
-        # Left cluster: x0 60-260, right cluster: x0 350-550
-        # Gap zone should be clearly in the middle third (204-408)
         words = (
             [{"x0": 60 + i * 10, "x1": 70 + i * 10, "top": 200, "bottom": 212,
-              "fontname": "Times", "size": 9} for i in range(20)]   # x0: 60–250
+              "fontname": "Times", "size": 9} for i in range(20)]
             +
             [{"x0": 360 + i * 10, "x1": 370 + i * 10, "top": 200, "bottom": 212,
-              "fontname": "Times", "size": 9} for i in range(20)]   # x0: 360–550
+              "fontname": "Times", "size": 9} for i in range(20)]
         )
-        cols, gap = analyzer._detect_columns_from_words(words, 612.0, 792.0)
+        split_x, cols, two_col = analyzer._find_split(words, 612.0, 792.0)
+        assert two_col
         assert len(cols) == 2
         assert cols[0].x0 < cols[1].x0
-        assert gap >= 0
 
     def test_single_column_detection(self, analyzer):
-        """Words uniformly distributed across the full width = single column."""
-        # Uniform distribution: midpoints at every 5pt step, no valley
+        """Uniform word distribution = single column."""
         words = [
             {"x0": 54 + i * 5, "x1": 57 + i * 5, "top": 200, "bottom": 212,
              "fontname": "Times", "size": 9}
-            for i in range(100)  # midpoints uniform from 55.5 to 555.5
+            for i in range(100)
         ]
-        cols, gap = analyzer._detect_columns_from_words(words, 612.0, 792.0)
-        # With uniform distribution the valley detection finds no meaningful split
-        # because both sides always have ~50% of words — passes the 20% threshold
-        # on both sides, but the valley bucket density equals the rest.
-        # Accept either 1 or 2 columns for uniform data — what matters is that
-        # clearly two-clustered data gives 2 columns (tested separately).
-        assert len(cols) >= 1
+        split_x, cols, two_col = analyzer._find_split(words, 612.0, 792.0)
+        assert len(cols) >= 1   # may or may not split; key check is two-clustered gives 2
 
     def test_empty_words_returns_single_column(self, analyzer):
-        cols, gap = analyzer._detect_columns_from_words([], 612.0, 792.0)
+        split_x, cols, two_col = analyzer._find_split([], 612.0, 792.0)
         assert len(cols) == 1
+        assert not two_col
 
     def test_column_widths_positive(self, analyzer):
         words = (
@@ -88,7 +82,7 @@ class TestColumnDetection:
             [{"x0": 324, "x1": 558, "top": 200, "bottom": 212,
               "fontname": "Times", "size": 9}] * 10
         )
-        cols, _ = analyzer._detect_columns_from_words(words, 612.0, 792.0)
+        split_x, cols, _ = analyzer._find_split(words, 612.0, 792.0)
         for col in cols:
             assert col.width > 0
 
@@ -141,16 +135,26 @@ class TestHeadingClassification:
 class TestColumnAssignment:
 
     def test_left_column_assigned(self, analyzer):
-        cols = [ColumnRegion(0, 54.0, 288.0, 234.0), ColumnRegion(1, 324.0, 558.0, 234.0)]
-        assert analyzer._assign_column(60.0, 280.0, cols) == 0
+        words_left = [{"x0": 60.0, "x1": 280.0, "top": 100, "bottom": 112,
+                       "fontname": "T", "size": 9}]
+        col_lists = analyzer._split_words_by_column(words_left, 306.0, 612.0, 792.0)
+        assert len(col_lists[0]) == 1  # goes to left column
+        assert len(col_lists[1]) == 0 if len(col_lists) > 1 else True
 
     def test_right_column_assigned(self, analyzer):
-        cols = [ColumnRegion(0, 54.0, 288.0, 234.0), ColumnRegion(1, 324.0, 558.0, 234.0)]
-        assert analyzer._assign_column(330.0, 550.0, cols) == 1
+        words_right = [{"x0": 330.0, "x1": 550.0, "top": 100, "bottom": 112,
+                        "fontname": "T", "size": 9}]
+        col_lists = analyzer._split_words_by_column(words_right, 306.0, 612.0, 792.0)
+        # midpoint = 440 > 306 → right column
+        assert len(col_lists) == 2
+        assert len(col_lists[1]) == 1
 
     def test_single_column_fallback(self, analyzer):
-        cols = [ColumnRegion(0, 54.0, 558.0, 504.0)]
-        assert analyzer._assign_column(100.0, 400.0, cols) == 0
+        words = [{"x0": 100.0, "x1": 400.0, "top": 100, "bottom": 112,
+                  "fontname": "T", "size": 9}]
+        col_lists = analyzer._split_words_by_column(words, 0.0, 612.0, 792.0)
+        assert len(col_lists) == 1
+        assert len(col_lists[0]) == 1
 
 
 # ---------------------------------------------------------------------------

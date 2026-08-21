@@ -31,6 +31,7 @@ def ieee_grammar():
             ColumnRegion(index=0, x0=54.0, x1=288.0, width=234.0),
             ColumnRegion(index=1, x0=324.0, x1=558.0, width=234.0),
         ],
+        split_x=306.0,
         column_gap=36.0,
         body_fontname="Times-Roman",
         body_fontsize=9.0,
@@ -82,7 +83,7 @@ def abstract_section(ieee_grammar):
         column_width=234.0,
     )
     return Section(
-        name="Abstract",
+        id="abstract", title="Abstract", level=1, parent_id=None,
         heading_block=heading,
         content_blocks=[content],
         flow_regions=[region],
@@ -108,7 +109,7 @@ def methodology_section(ieee_grammar):
         FlowRegion(page=4, column=0, bbox=BBox(54, 710, 288, 670), column_width=234.0),
     ]
     return Section(
-        name="III. METHODOLOGY",
+        id="sec_iii_methodology", title="III. METHODOLOGY", level=1, parent_id=None,
         heading_block=heading,
         content_blocks=blocks,
         flow_regions=regions,
@@ -123,7 +124,7 @@ def references_section():
     content = make_block("[1] Smith, J. et al. Nature 2020.", page=11, col=0,
                          y0=695.0, y1=680.0, ro=91)
     return Section(
-        name="References",
+        id="references", title="References", level=1, parent_id=None,
         heading_block=heading,
         content_blocks=[content],
         flow_regions=[

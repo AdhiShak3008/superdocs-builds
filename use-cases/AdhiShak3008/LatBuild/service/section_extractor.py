@@ -50,7 +50,7 @@ def extract_section(section: Section, grammar: DocumentGrammar) -> ExtractedSect
     estimated_lines = max(1, int(total_height / grammar.body_line_height))
 
     return ExtractedSection(
-        section_name=section.name,
+        section_name=section.title,
         clean_text=clean_text,
         word_count=word_count,
         char_count=char_count,

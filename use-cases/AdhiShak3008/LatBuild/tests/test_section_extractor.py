@@ -31,7 +31,7 @@ class TestExtractSection:
 
     def test_section_name_preserved(self, abstract_section, ieee_grammar):
         result = extract_section(abstract_section, ieee_grammar)
-        assert result.section_name == abstract_section.name
+        assert result.section_name == abstract_section.title
 
     def test_multi_block_section_joined(self, methodology_section, ieee_grammar):
         result = extract_section(methodology_section, ieee_grammar)
@@ -48,7 +48,7 @@ class TestExtractSection:
         from pdf_analyzer import BBox
         heading = make_block("II. RESULTS", is_heading=True)
         section = Section(
-            name="II. RESULTS",
+            id="sec_ii_results", title="II. RESULTS", level=1, parent_id=None,
             heading_block=heading,
             content_blocks=[],
             flow_regions=[FlowRegion(1, 0, BBox(54,700,288,600), 234.0)],

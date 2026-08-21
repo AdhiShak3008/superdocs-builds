@@ -190,7 +190,7 @@ class TestNonContentCollisionInvariant:
             column_width=234.0,
         )
         section = Section(
-            name="III. METHODOLOGY",
+            id="sec_iii_methodology", title="III. METHODOLOGY", level=1, parent_id=None,
             heading_block=heading,
             content_blocks=[content],
             flow_regions=[region],
