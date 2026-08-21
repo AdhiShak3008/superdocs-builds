@@ -143,6 +143,10 @@ KNOWN_HEADINGS = {
     "references", "acknowledgment", "acknowledgments", "acknowledgement",
     "acknowledgements", "related work", "background", "motivation",
     "overview", "discussion", "future work", "appendix",
+    "keywords", "index terms", "keyword", "key words",
+    "methodology", "methods", "results", "experiments", "evaluation",
+    "implementation", "system", "architecture", "design", "analysis",
+    "contributions", "contribution", "limitations", "summary",
 }
 
 
@@ -321,83 +325,107 @@ class PDFAnalyzer:
         self, words: list, page_width: float, page_height: float
     ) -> Tuple[List[ColumnRegion], float]:
         """
-        Detect columns by building an x-coordinate histogram.
+        Detect column boundaries using word x-midpoint clustering.
+
+        For justified two-column text, word x0 values span the full column
+        width and gutter-based detection fails. Instead, we cluster word
+        midpoints — body text in each column clusters around that column's
+        visual center regardless of justification.
+
         Returns (column_regions, column_gap).
         """
         if not words:
-            return [ColumnRegion(0, page_width * 0.08, page_width * 0.92, page_width * 0.84)], 0.0
+            return [ColumnRegion(0, page_width * 0.08, page_width * 0.92,
+                                 page_width * 0.84)], 0.0
 
-        # Exclude header/footer zone (top 10% and bottom 10%)
+        # Exclude header/footer zone
         content_words = [
             w for w in words
-            if page_height * 0.08 < w["top"] < page_height * 0.92
+            if page_height * 0.05 < w["top"] < page_height * 0.95
         ]
         if not content_words:
             content_words = words
 
-        # Build x0 histogram in 5-point buckets
-        bucket_size = 5.0
+        # Compute x-midpoint of each word
+        # Exclude very wide words (titles, headers that span both columns)
+        # A word is "wide" if it spans more than 35% of page width
+        max_word_width = page_width * 0.35
+        body_words = [w for w in content_words
+                      if (w["x1"] - w["x0"]) <= max_word_width]
+
+        if not body_words:
+            body_words = content_words
+
+        mids = [(w["x0"] + w["x1"]) / 2 for w in body_words]
+
+        # Use simple density valley detection:
+        # Build histogram of x-midpoints in 10pt buckets.
+        # A two-column doc will show two dense humps with a valley between them.
+        bucket = 10.0
         hist = {}
-        for w in content_words:
-            bucket = int(w["x0"] / bucket_size) * bucket_size
-            hist[bucket] = hist.get(bucket, 0) + 1
+        for mid in mids:
+            b = int(mid / bucket) * bucket
+            hist[b] = hist.get(b, 0) + 1
 
-        if not hist:
-            return [ColumnRegion(0, page_width * 0.08, page_width * 0.92, page_width * 0.84)], 0.0
+        # Find valley: look for the minimum-density region between 30% and 70%
+        # of page width that separates two high-density regions
+        mid_start = page_width * 0.30
+        mid_end   = page_width * 0.70
+        mid_buckets = {k: v for k, v in hist.items() if mid_start <= k <= mid_end}
 
-        # Find the gap zone (low-density region between potential columns)
-        max_x = max(hist.keys())
-        min_x = min(hist.keys())
-        total_range = max_x - min_x
-
-        if total_range < page_width * 0.3:
-            # Looks single-column
+        if not mid_buckets:
             x0 = min(w["x0"] for w in content_words)
             x1 = max(w["x1"] for w in content_words)
             return [ColumnRegion(0, x0, x1, x1 - x0)], 0.0
 
-        # Look for a zero-density gap in the middle portion of the page.
-        # Real two-column layout has a physical gutter with NO text x0 values.
-        mid_start = page_width * 0.25
-        mid_end = page_width * 0.75
-        occupied_xs = sorted(k for k in hist.keys() if mid_start <= k <= mid_end)
+        # Find the x with lowest density in the middle zone
+        valley_x = min(mid_buckets, key=lambda k: mid_buckets[k])
 
-        # Find longest run of empty buckets (gap) in the middle zone
-        if occupied_xs:
-            best_gap_center = None
-            best_gap_width = 0
-            prev_x = occupied_xs[0]
-            for x in occupied_xs[1:]:
-                gap_w = x - prev_x
-                if gap_w > best_gap_width:
-                    best_gap_width = gap_w
-                    best_gap_center = (prev_x + x) / 2
-                prev_x = x
+        # Check that there are meaningful word counts on both sides of valley
+        left_count  = sum(v for k, v in hist.items() if k < valley_x)
+        right_count = sum(v for k, v in hist.items() if k > valley_x)
 
-            # Only split if there is a meaningful gap (> 10% of page width)
-            if best_gap_center and best_gap_width > page_width * 0.10:
-                # Two-column: gap found in middle
-                gap_center = best_gap_center
+        min_side_fraction = 0.20  # each side must have at least 20% of words
+        total = len(body_words)
+        if (left_count / total < min_side_fraction or
+                right_count / total < min_side_fraction):
+            # Not a balanced two-column split — treat as single column
+            x0 = min(w["x0"] for w in content_words)
+            x1 = max(w["x1"] for w in content_words)
+            return [ColumnRegion(0, x0, x1, x1 - x0)], 0.0
 
-                left_words = [w for w in content_words if w["x1"] <= gap_center]
-                right_words = [w for w in content_words if w["x0"] >= gap_center]
+        # Compute the actual column extents using ONLY clearly single-column words
+        # i.e. words whose full width fits within one column's zone
+        half_col_w = (valley_x - page_width * 0.10)  # approximate half column width
+        left_only  = [w for w in body_words
+                      if w["x1"] < valley_x - 5     # entirely in left zone
+                      and (w["x0"] + w["x1"]) / 2 < valley_x]
+        right_only = [w for w in body_words
+                      if w["x0"] > valley_x + 5     # entirely in right zone
+                      and (w["x0"] + w["x1"]) / 2 > valley_x]
 
-                if left_words and right_words:
-                    left_x0 = min(w["x0"] for w in left_words)
-                    left_x1 = max(w["x1"] for w in left_words)
-                    right_x0 = min(w["x0"] for w in right_words)
-                    right_x1 = max(w["x1"] for w in right_words)
-                    col_gap = right_x0 - left_x1
+        if not left_only:
+            left_only  = [w for w in body_words if (w["x0"]+w["x1"])/2 < valley_x]
+        if not right_only:
+            right_only = [w for w in body_words if (w["x0"]+w["x1"])/2 >= valley_x]
 
-                    return [
-                        ColumnRegion(0, left_x0, left_x1, left_x1 - left_x0),
-                        ColumnRegion(1, right_x0, right_x1, right_x1 - right_x0),
-                    ], col_gap
+        left_x0  = min(w["x0"] for w in left_only)
+        left_x1  = max(w["x1"] for w in left_only)
+        right_x0 = min(w["x0"] for w in right_only)
+        right_x1 = max(w["x1"] for w in right_only)
 
-        # Default: single column
-        x0 = min(w["x0"] for w in content_words)
-        x1 = max(w["x1"] for w in content_words)
-        return [ColumnRegion(0, x0, x1, x1 - x0)], 0.0
+        # If columns overlap (can happen with centered/justified text),
+        # force a clean split at the valley_x
+        if left_x1 > right_x0:
+            left_x1  = valley_x - 2
+            right_x0 = valley_x + 2
+
+        col_gap = max(0.0, right_x0 - left_x1)
+
+        return [
+            ColumnRegion(0, left_x0, left_x1, left_x1 - left_x0),
+            ColumnRegion(1, right_x0, right_x1, right_x1 - right_x0),
+        ], col_gap
 
     def _detect_columns(self, page_obj, grammar: DocumentGrammar) -> List[ColumnRegion]:
         """Use grammar's column regions (consistent across pages)."""
@@ -452,7 +480,7 @@ class PDFAnalyzer:
         return elements
 
     # ------------------------------------------------------------------
-    # Text block extraction
+    # Text block extraction — correct two-column reading order
     # ------------------------------------------------------------------
 
     def _extract_text_blocks(
@@ -466,79 +494,149 @@ class PDFAnalyzer:
         non_content: List[NonContentElement],
     ) -> List[TextBlock]:
         """
-        Extract text blocks grouped by paragraph-level proximity.
-        Each block has its bounding box, font info, column, and reading order.
+        Extract text blocks in correct reading order for multi-column layouts.
+
+        Critical: words must be split into columns FIRST, then sorted
+        vertically within each column, then paragraphs formed per column.
+        Never sort all words by y-coordinate across the full page width —
+        that interleaves two columns line-by-line.
+
+        Reading order: col 0 top→bottom, col 1 top→bottom, col 2 top→bottom.
         """
         words = page_obj.extract_words(
             extra_attrs=["fontname", "size"],
-            use_text_flow=True,
+            use_text_flow=False,   # do NOT use pdfplumber's flow — we control order
             keep_blank_chars=False,
         )
         if not words:
             return []
 
-        # Group words into lines (same y-position ± tolerance)
-        lines = self._group_words_into_lines(words, tolerance=3.0)
+        # ------------------------------------------------------------------
+        # Step 1: Detect column boundary for THIS page (may differ from grammar)
+        # Use grammar columns as the reference but allow per-page detection.
+        # ------------------------------------------------------------------
+        page_cols = self._detect_columns_for_page(words, page_obj.width, page_height, grammar)
 
-        # Group lines into paragraphs (gap > 1.5x line height = new paragraph)
-        paragraphs = self._group_lines_into_paragraphs(lines, grammar.body_line_height)
+        # ------------------------------------------------------------------
+        # Step 2: Assign each word to a column based on its x-midpoint.
+        # Words that span columns (e.g. title, single-column abstract header)
+        # go to col 0 and are treated as single-column blocks.
+        # ------------------------------------------------------------------
+        words_by_col: Dict[int, list] = {i: [] for i in range(len(page_cols))}
+        for w in words:
+            col_idx = self._assign_word_to_column(w, page_cols)
+            words_by_col[col_idx].append(w)
 
+        # ------------------------------------------------------------------
+        # Step 3: Within each column, sort words by top (y-coordinate).
+        # Then group into lines, then paragraphs.
+        # ------------------------------------------------------------------
         blocks = []
-        for para in paragraphs:
-            if not para:
+        for col_idx in sorted(words_by_col.keys()):
+            col_words = sorted(words_by_col[col_idx], key=lambda w: (w["top"], w["x0"]))
+            if not col_words:
                 continue
 
-            all_words_in_para = [w for line in para for w in line]
-            text = " ".join(w["text"] for w in all_words_in_para)
-            text = text.strip()
-            if not text:
-                continue
+            lines = self._group_words_into_lines(col_words, tolerance=3.0)
+            paragraphs = self._group_lines_into_paragraphs(lines, grammar.body_line_height)
 
-            x0 = min(w["x0"] for w in all_words_in_para)
-            y0 = min(w["top"] for w in all_words_in_para)
-            x1 = max(w["x1"] for w in all_words_in_para)
-            y1 = max(w["bottom"] for w in all_words_in_para)
+            for para in paragraphs:
+                if not para:
+                    continue
+                all_words_in_para = [w for line in para for w in line]
+                text = " ".join(w["text"] for w in all_words_in_para).strip()
+                if not text:
+                    continue
 
-            bbox = BBox(x0=x0, y0=y0, x1=x1, y1=y1)
+                x0 = min(w["x0"] for w in all_words_in_para)
+                y0 = min(w["top"] for w in all_words_in_para)
+                x1 = max(w["x1"] for w in all_words_in_para)
+                y1 = max(w["bottom"] for w in all_words_in_para)
+                bbox = BBox(x0=x0, y0=y0, x1=x1, y1=y1)
 
-            # Skip if entirely overlapping a non-content element
-            if self._overlaps_non_content(bbox, non_content):
-                continue
+                if self._overlaps_non_content(bbox, non_content):
+                    continue
 
-            # Font info from most common font in paragraph
-            fontnames = [w.get("fontname", "") for w in all_words_in_para]
-            sizes = [float(w.get("size", grammar.body_fontsize)) for w in all_words_in_para]
-            fontname = max(set(fontnames), key=fontnames.count)
-            fontsize = round(sum(sizes) / len(sizes), 1)
+                fontnames = [w.get("fontname", "") for w in all_words_in_para]
+                sizes = [float(w.get("size", grammar.body_fontsize)) for w in all_words_in_para]
+                fontname = max(set(fontnames), key=fontnames.count)
+                fontsize = round(sum(sizes) / len(sizes), 1)
+                is_bold = "bold" in fontname.lower() or "Bold" in fontname
+                is_heading = self._classify_heading(text, fontsize, is_bold, grammar)
 
-            is_bold = "bold" in fontname.lower() or "Bold" in fontname
-            is_heading = self._classify_heading(text, fontsize, is_bold, grammar)
-
-            col = self._assign_column(x0, x1, columns)
-
-            block = TextBlock(
-                text=text,
-                bbox=bbox,
-                page=page_num,
-                column=col,
-                fontname=fontname,
-                fontsize=fontsize,
-                is_bold=is_bold,
-                is_heading=is_heading,
-                reading_order=reading_order_counter[0],
-                line_height=grammar.body_line_height,
-            )
-            reading_order_counter[0] += 1
-            blocks.append(block)
-
-        # Sort blocks by reading order: column-major (left col first, then right)
-        blocks.sort(key=lambda b: (b.column, b.bbox.y0))
-
-        # Re-assign reading order after sorting
-        for i, block in enumerate(blocks):
-            block.reading_order = reading_order_counter[0] - len(blocks) + i
+                block = TextBlock(
+                    text=text,
+                    bbox=bbox,
+                    page=page_num,
+                    column=col_idx,
+                    fontname=fontname,
+                    fontsize=fontsize,
+                    is_bold=is_bold,
+                    is_heading=is_heading,
+                    reading_order=reading_order_counter[0],
+                    line_height=grammar.body_line_height,
+                )
+                reading_order_counter[0] += 1
+                blocks.append(block)
 
         return blocks
+
+    def _detect_columns_for_page(
+        self,
+        words: list,
+        page_width: float,
+        page_height: float,
+        grammar: DocumentGrammar,
+    ) -> List[ColumnRegion]:
+        """
+        Detect columns for a specific page. Uses per-page word geometry
+        rather than relying solely on grammar (which comes from page 1).
+        Falls back to grammar columns if detection is inconclusive.
+        """
+        # Filter out header/footer zone
+        content_words = [
+            w for w in words
+            if page_height * 0.07 < w["top"] < page_height * 0.93
+        ]
+        if not content_words:
+            return grammar.column_regions
+
+        detected, gap = self._detect_columns_from_words(content_words, page_width, page_height)
+
+        # If detection found same column count as grammar, use detected
+        # (more accurate for this page). If mismatch, trust grammar.
+        if len(detected) == grammar.column_count:
+            return detected
+
+        # Single-column page in a multi-column document (e.g. title page)
+        if len(detected) == 1 and grammar.column_count > 1:
+            return detected
+
+        return grammar.column_regions
+
+    def _assign_word_to_column(self, word: dict, columns: List[ColumnRegion]) -> int:
+        """
+        Assign a word to a column using its x-midpoint.
+        Words whose midpoint falls in the gutter go to the nearest column.
+        Words that span more than half the page width (titles, etc.) go to col 0.
+        """
+        word_width = word["x1"] - word["x0"]
+        page_span_threshold = columns[-1].x1 - columns[0].x0
+
+        # Wide blocks (titles, single-col headers) → always col 0
+        if len(columns) > 1 and word_width > page_span_threshold * 0.6:
+            return 0
+
+        mid = (word["x0"] + word["x1"]) / 2
+        best_col = 0
+        best_dist = float("inf")
+        for col in columns:
+            col_mid = (col.x0 + col.x1) / 2
+            dist = abs(mid - col_mid)
+            if dist < best_dist:
+                best_dist = dist
+                best_col = col.index
+        return best_col
 
     def _group_words_into_lines(self, words: list, tolerance: float = 3.0) -> list:
         """Group words that share approximately the same baseline."""
@@ -561,24 +659,50 @@ class PDFAnalyzer:
         return lines
 
     def _group_lines_into_paragraphs(self, lines: list, line_height: float) -> list:
-        """Group consecutive lines into paragraphs based on vertical gap."""
+        """
+        Group consecutive lines into paragraphs based on vertical gap.
+
+        For body text with ~1pt leading gaps, we need a threshold that
+        separates normal line spacing from paragraph/section breaks.
+        We use adaptive thresholding based on the actual gap distribution
+        rather than a fixed multiple of line_height.
+        """
         if not lines:
             return []
+        if len(lines) == 1:
+            return [lines]
+
+        # Measure all inter-line gaps
+        gaps = []
+        for i in range(1, len(lines)):
+            prev_bottom = max(w["bottom"] for w in lines[i - 1])
+            curr_top    = min(w["top"]    for w in lines[i])
+            gaps.append(curr_top - prev_bottom)
+
+        if not gaps:
+            return [lines]
+
+        # Use the median gap as "normal line spacing"
+        sorted_gaps = sorted(gaps)
+        median_gap = sorted_gaps[len(sorted_gaps) // 2]
+
+        # Threshold: anything more than 2x the median gap (or at least 3pt)
+        # is a paragraph break
+        threshold = max(median_gap * 2.5, 3.0)
+
         paragraphs = []
         current_para = [lines[0]]
-        threshold = line_height * 1.6
 
-        for line in lines[1:]:
-            prev_bottom = max(w["bottom"] for w in current_para[-1])
-            curr_top = min(w["top"] for w in line)
-            gap = curr_top - prev_bottom
-            if gap > threshold:
+        for i, line in enumerate(lines[1:]):
+            if gaps[i] > threshold:
                 paragraphs.append(current_para)
                 current_para = [line]
             else:
                 current_para.append(line)
+
         if current_para:
             paragraphs.append(current_para)
+
         return paragraphs
 
     def _classify_heading(
@@ -588,23 +712,48 @@ class PDFAnalyzer:
         text_stripped = text.strip()
         text_lower = text_stripped.lower()
 
-        # Roman numeral prefix: I. II. III. IV. V. etc.
+        # Normalise PDF letter-spacing artifacts: "I N T R O D U C T I O N"
+        # Some PDFs encode spaced small-caps headings with individual glyphs
+        text_normalised = re.sub(r'(?<=[A-Z]) (?=[A-Z])', '', text_stripped)
+        text_norm_lower = text_normalised.lower()
+
+        # Roman numeral prefix: I. II. III. IV. V. etc. (IEEE section style)
+        # Handles both "I. INTRODUCTION" and "I. I NTRODUCTION" (spaced glyphs)
         if re.match(r'^[IVX]+\.\s+\S', text_stripped):
             return True
-
-        # Known heading words
-        if text_lower in KNOWN_HEADINGS:
+        if re.match(r'^[IVX]+\.\s+\S', text_normalised):
             return True
+
+        # Lettered subsection: A. B. C. (IEEE subsection style)
+        if re.match(r'^[A-Z]\.\s+[A-Z]', text_stripped):
+            return True
+
+        # IEEE keyword/index terms: "Keywords—", "Index Terms—", "Keywords:"
+        if re.match(r'^(index\s+terms|keywords?|key\s+words)[\s\u2014\-:—]',
+                    text_norm_lower):
+            return True
+
+        # Exact match against known headings (normalised)
+        cleaned = text_norm_lower.rstrip('.:—\u2014 ')
+        if cleaned in KNOWN_HEADINGS:
+            return True
+
+        # Known heading as first word/phrase
         for kh in KNOWN_HEADINGS:
-            if text_lower.startswith(kh + " ") or text_lower.startswith(kh + "\n"):
+            if text_norm_lower.startswith(kh + " ") or text_norm_lower.startswith(kh + "\n"):
                 return True
 
-        # Larger than body text and bold
+        # Larger than body text AND bold
         if fontsize > grammar.body_fontsize + 1.5 and is_bold:
             return True
 
-        # ALL CAPS short text (likely a heading)
-        if text_stripped.isupper() and len(text_stripped.split()) <= 8 and len(text_stripped) > 2:
+        # ALL CAPS short block (2–8 words) after normalising spacing artifacts
+        norm_no_spaces = text_normalised.replace(' ', '')
+        if norm_no_spaces.isupper() and 1 < len(text_normalised.split()) <= 8:
+            return True
+
+        # Single ALL CAPS word — check against known headings
+        if text_norm_lower.rstrip('.:— ') in KNOWN_HEADINGS:
             return True
 
         return False

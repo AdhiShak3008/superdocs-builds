@@ -120,7 +120,7 @@ class DocumentFlowMap:
 # ---------------------------------------------------------------------------
 
 NON_EDITABLE_SECTIONS = {
-    "references", "bibliography",
+    "references", "bibliography", "keywords", "index terms", "key words",
 }
 
 
