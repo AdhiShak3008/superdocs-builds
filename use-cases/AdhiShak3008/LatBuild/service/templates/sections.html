@@ -41,6 +41,11 @@
               &nbsp;·&nbsp;
               ~{{ section.word_count }} words
             </span>
+            {% if section.full_text %}
+            <p class="section-preview">{{ section.full_text[:250] }}{% if section.full_text | length > 250 %}…{% endif %}</p>
+            {% elif section.word_count == 0 %}
+            <p class="section-preview muted">(content in subsections below)</p>
+            {% endif %}
           </div>
         </label>
         {% else %}

@@ -220,6 +220,7 @@ def api_upload():
                 "pages": s.pages,
                 "word_count": s.word_count,
                 "is_editable": s.is_editable,
+                "preview": s.full_text[:300] if s.full_text else "",
             }
             for s in editable
         ],
@@ -246,6 +247,7 @@ def api_sections():
                 "parent_id": s.parent_id,
                 "pages": s.pages,
                 "word_count": s.word_count,
+                "preview": s.full_text[:300] if s.full_text else "",
             }
             for s in editable
         ]
