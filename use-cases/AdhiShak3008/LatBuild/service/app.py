@@ -118,6 +118,12 @@ def sections_page():
 @app.route("/edit")
 def edit_page():
     state = _get_state()
+
+    # Accept sections from URL params (from sections page Continue button)
+    sections_param = request.args.get("sections", "")
+    if sections_param:
+        state["selected_sections"] = [s.strip() for s in sections_param.split(",") if s.strip()]
+
     if not state["selected_sections"] or not state["flow_map"]:
         return redirect(url_for("sections_page"))
     fm = state["flow_map"]
@@ -126,6 +132,8 @@ def edit_page():
         for name in state["selected_sections"]
         if fm.get_section(name)
     ]
+    if not selected:
+        return redirect(url_for("sections_page"))
     return render_template(
         "edit.html",
         selected_sections=selected,
@@ -258,6 +266,22 @@ def api_sections():
 # API: Select sections + start transform
 # ---------------------------------------------------------------------------
 
+
+def _build_paper_context(fm) -> str:
+    """
+    Build a concise paper context: title + abstract only.
+    Enough for SuperDocs to understand the domain without noise.
+    """
+    parts = []
+    preamble = next((s for s in fm.sections if "preamble" in s.id.lower()), None)
+    if preamble and preamble.full_text:
+        parts.append(f"Paper title: {preamble.full_text[:150].strip()}")
+    abstract = next((s for s in fm.sections if "abstract" in s.title.lower()), None)
+    if abstract and abstract.full_text:
+        parts.append(f"Abstract: {abstract.full_text[:600].strip()}")
+    return "\n\n".join(parts)
+
+
 @app.route("/api/transform", methods=["POST"])
 def api_transform():
     """
@@ -267,12 +291,14 @@ def api_transform():
     """
     data = request.get_json() or {}
     section_names = data.get("sections", [])
-    instruction = data.get("instruction", "").strip()
+    # Support both single instruction and per-section instructions
+    instructions_map = data.get("instructions", {})  # {section_title: instruction}
+    single_instruction = data.get("instruction", "").strip()
 
     if not section_names:
         return jsonify({"error": "No sections selected."}), 400
-    if not instruction:
-        return jsonify({"error": "Instruction is required."}), 400
+    if not instructions_map and not single_instruction:
+        return jsonify({"error": "At least one instruction is required."}), 400
 
     state = _get_state()
     if not state["flow_map"]:
@@ -280,7 +306,7 @@ def api_transform():
 
     fm = state["flow_map"]
     state["selected_sections"] = section_names
-    state["instruction"] = instruction
+    state["instruction"] = single_instruction or str(instructions_map)
     state["jobs"] = {}
     state["output_path"] = None
     state["fidelity_report"] = None
@@ -297,6 +323,12 @@ def api_transform():
     # Start one SuperDocs job per section (parallel)
     def start_job(section):
         extracted = extract_section(section, fm.grammar)
+        # Use per-section instruction if available, otherwise fall back to single
+        instruction = instructions_map.get(section.title, single_instruction)
+
+        # Send only the user instruction — no background context.
+        # SuperDocs rewrites the uploaded section document directly.
+        # Context was causing section content swapping.
         full_instruction = build_superdocs_instruction(instruction, extracted)
         docx_bytes = prose_to_docx(extracted.clean_text, title=section.title)
         conv_session_id = f"latbuild-{uuid.uuid4().hex[:12]}"
@@ -331,7 +363,18 @@ def api_transform():
     with ThreadPoolExecutor(max_workers=min(4, len(sections_to_edit))) as executor:
         futures = {executor.submit(start_job, s): s for s in sections_to_edit}
         for future in as_completed(futures):
-            name, job = future.result()
+            try:
+                name, job = future.result()
+            except Exception as e:
+                sec = futures[future]
+                name = sec.title
+                job = {
+                    "session_id": None, "job_id": None,
+                    "status": "failed",
+                    "original_text": sec.full_text,
+                    "proposed_text": None, "pending_changes": [],
+                    "approved": False, "error": str(e),
+                }
             state["jobs"][name] = job
 
     return jsonify({
@@ -462,13 +505,23 @@ def api_apply():
 
     fm = state["flow_map"]
 
+    # Debug: log what we received vs what we have
+    import logging
+    logging.warning(f"api_apply: approved_texts keys={list(approved_texts.keys())}")
+    logging.warning(f"api_apply: state jobs keys={list(state['jobs'].keys())}")
+
     # Collect section + replacement pairs
     edits = []
     for section_name, job in state["jobs"].items():
-        if not job.get("approved", True):
-            continue  # Skip rejected sections
-        replacement = approved_texts.get(section_name) or job.get("proposed_text")
+        # Check if this section was approved via the frontend
+        replacement = approved_texts.get(section_name)
+
+        # If not in approved_texts, fall back to proposed_text from the job
         if not replacement:
+            replacement = job.get("proposed_text")
+
+        if not replacement:
+            continue
             continue
         section = fm.get_section(section_name)
         if section:

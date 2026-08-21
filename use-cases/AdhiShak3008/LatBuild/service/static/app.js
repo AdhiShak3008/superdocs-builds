@@ -117,9 +117,9 @@ function initSectionsPage() {
 
 function initEditPage() {
   const form    = document.getElementById('edit-form');
-  const input   = document.getElementById('instruction-input');
   const statusEl = document.getElementById('transform-status');
   const startBtn = document.getElementById('start-btn');
+  const applyAllBtn = document.getElementById('apply-all-btn');
 
   // Recover selected sections from URL params or state
   const params = new URLSearchParams(window.location.search);
@@ -127,11 +127,33 @@ function initEditPage() {
   const selectedSections = window.EDIT_STATE?.selectedSections
     || sectionsParam.split(',').filter(Boolean);
 
+  // "Apply to All" button
+  applyAllBtn?.addEventListener('click', () => {
+    const bulkText = document.getElementById('bulk-instruction')?.value || '';
+    if (!bulkText.trim()) return;
+    document.querySelectorAll('.section-instruction-input').forEach(ta => {
+      ta.value = bulkText;
+    });
+  });
+
   if (form) {
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      const instruction = input.value.trim();
-      if (!instruction) return;
+
+      // Collect per-section instructions
+      const instructions = {};
+      let allFilled = true;
+      document.querySelectorAll('.section-instruction-input').forEach(ta => {
+        const section = ta.dataset.section;
+        const text = ta.value.trim();
+        if (!text) allFilled = false;
+        instructions[section] = text;
+      });
+
+      if (!allFilled) {
+        statusEl.textContent = 'Please enter an instruction for every section.';
+        return;
+      }
 
       startBtn.disabled = true;
       statusEl.innerHTML = '<span class="spinner"></span> Starting SuperDocs jobs…';
@@ -142,7 +164,7 @@ function initEditPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             sections: selectedSections,
-            instruction,
+            instructions,
           }),
         });
         const data = await resp.json();
@@ -282,7 +304,9 @@ function markDecision(cardIdx, approved) {
   const actionsEl   = document.getElementById(`actions-${cardIdx}`);
 
   if (decisionEl) {
-    decisionEl.textContent = approved ? '✓ Approved' : '✗ Rejected — keeping original';
+    decisionEl.textContent = approved
+      ? '✓ Approved — click Reject to change'
+      : '✗ Rejected — click Approve to change';
     decisionEl.className = `section-decision ${approved ? 'approved' : 'rejected'}`;
     decisionEl.classList.remove('hidden');
   }
@@ -290,7 +314,8 @@ function markDecision(cardIdx, approved) {
     statusBadge.textContent = approved ? '✓ Approved' : '✗ Rejected';
     statusBadge.className = `section-status-badge ${approved ? 'approved' : 'rejected'}`;
   }
-  actionsEl?.classList.add('hidden');
+  // Keep action buttons visible so the user can change their mind
+  // actionsEl stays shown — do NOT hide it
   updateApplyButton();
 }
 

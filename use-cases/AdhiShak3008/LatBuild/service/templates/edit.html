@@ -29,25 +29,33 @@
     </section>
 
     <section class="card">
-      <h2>SuperDocs Instruction</h2>
-      <p>Describe what you want SuperDocs to do to the selected sections. One instruction applies to all selected sections.</p>
+      <h2>Instructions per Section</h2>
+      <p>Enter a specific instruction for each selected section. SuperDocs will process each independently.</p>
 
       <form id="edit-form">
-        <textarea
-          id="instruction-input"
-          rows="4"
-          placeholder="e.g. Rewrite to be more concise and emphasize the experimental contribution. Preserve all citations and technical terminology."
-          required
-        >{{ instruction }}</textarea>
-
-        <div class="instruction-tips">
-          <p class="muted">Tips:</p>
-          <ul class="muted">
-            <li>SuperDocs will preserve all citation markers (e.g. [1], [2]) automatically.</li>
-            <li>You can ask for tone changes, conciseness, improved clarity, or restructuring.</li>
-            <li>The layout engine handles length changes — your text can be shorter or longer.</li>
-          </ul>
+        {% for section in selected_sections %}
+        <div class="section-instruction-group">
+          <label class="section-instruction-label">
+            <span class="section-name">{{ section.title }}</span>
+            <span class="muted">(~{{ section.word_count }} words, p{{ section.start_page }}{% if section.start_page != section.end_page %}–{{ section.end_page }}{% endif %})</span>
+          </label>
+          <textarea
+            class="section-instruction-input"
+            data-section="{{ section.title }}"
+            rows="2"
+            placeholder="e.g. Make this more concise and emphasize the experimental contribution."
+            required
+          ></textarea>
         </div>
+        {% endfor %}
+
+        <details class="apply-all-group">
+          <summary>Apply one instruction to all sections</summary>
+          <div class="apply-all-inner">
+            <textarea id="bulk-instruction" rows="2" placeholder="Type here and click Apply to All"></textarea>
+            <button type="button" class="btn btn-secondary btn-sm" id="apply-all-btn">Apply to All</button>
+          </div>
+        </details>
 
         <div id="transform-status" class="status-msg"></div>
 

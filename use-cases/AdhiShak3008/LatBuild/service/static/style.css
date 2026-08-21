@@ -271,3 +271,54 @@ code { background: #f1f5f9; padding: 1px 4px; border-radius: 3px; font-size: 0.8
   margin-top: 6px;
 }
 .section-item-sub { margin-left: 24px; }
+
+/* Per-section instruction groups */
+.section-instruction-group {
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  background: #fafbfc;
+}
+.section-instruction-label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.9rem;
+}
+.section-instruction-label .section-name { font-weight: 700; }
+.section-instruction-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  font-size: 0.88rem;
+  resize: vertical;
+  font-family: inherit;
+}
+.apply-all-group {
+  margin-top: 16px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+.apply-all-group summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: #1d4ed8;
+  font-weight: 500;
+}
+.apply-all-inner {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  margin-top: 8px;
+}
+.apply-all-inner textarea {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  font-size: 0.85rem;
+  resize: vertical;
+  font-family: inherit;
+}

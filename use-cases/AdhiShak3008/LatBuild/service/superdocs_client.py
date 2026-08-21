@@ -93,9 +93,16 @@ def upload_document(file_bytes, filename, session_id):
     url = f"{BASE_URL}/v1/documents/upload"
     files = {"file": (filename, file_bytes, "application/octet-stream")}
     data = {"session_id": session_id}
-    response = requests.post(url, headers=_auth_headers(), files=files, data=data)
-    _raise_for_status(response)
-    return response.json()
+    for attempt in range(3):
+        try:
+            response = requests.post(url, headers=_auth_headers(), files=files, data=data, timeout=60)
+            _raise_for_status(response)
+            return response.json()
+        except requests.exceptions.ConnectionError as e:
+            if attempt == 2:
+                raise SuperDocsError(f"Upload failed after 3 attempts: {e}")
+            time.sleep(2 ** attempt)
+            files = {"file": (filename, file_bytes, "application/octet-stream")}  # reset file
 
 
 def start_transformation(session_id, document_html, instruction):
@@ -116,9 +123,15 @@ def start_transformation(session_id, document_html, instruction):
         "approval_mode": "ask_every_time",
         "model_tier": "pro",
     }
-    response = requests.post(url, headers=_json_headers(), json=payload)
-    _raise_for_status(response)
-    return response.json()["job_id"]
+    for attempt in range(3):
+        try:
+            response = requests.post(url, headers=_json_headers(), json=payload, timeout=60)
+            _raise_for_status(response)
+            return response.json()["job_id"]
+        except requests.exceptions.ConnectionError as e:
+            if attempt == 2:
+                raise SuperDocsError(f"Transform failed after 3 attempts: {e}")
+            time.sleep(2 ** attempt)
 
 
 def poll_job(job_id):

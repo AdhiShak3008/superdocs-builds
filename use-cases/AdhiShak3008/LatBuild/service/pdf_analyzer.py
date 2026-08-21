@@ -219,6 +219,10 @@ class PDFAnalyzer:
                 all_blocks.extend(blocks)
                 all_non_content.extend(non_content)
 
+        # Post-process: replace block text with pymupdf's cleaner extraction.
+        # pymupdf infers spaces from glyph gaps, solving the concatenation problem.
+        self._replace_text_with_pymupdf(pdf_path, all_blocks)
+
         return AnalyzedDocument(
             path=pdf_path,
             page_count=len(pages),
@@ -855,6 +859,60 @@ class PDFAnalyzer:
                 if bbox.area > 0 and (ox * oy) / bbox.area > 0.5:
                     return True
         return False
+
+
+    # ------------------------------------------------------------------
+    # pymupdf text replacement pass
+    # ------------------------------------------------------------------
+
+    def _replace_text_with_pymupdf(
+        self, pdf_path: str, all_blocks: List[TextBlock]
+    ) -> None:
+        """
+        Replace each block's text with pymupdf's extraction.
+
+        Uses column-aware clipping: restrict x range to the block's column
+        to avoid cross-column text bleeding (the root cause of Abstract disappearing).
+        """
+        import fitz
+
+        doc = fitz.open(pdf_path)
+
+        for block in all_blocks:
+            page_idx = block.page - 1
+            if page_idx < 0 or page_idx >= len(doc):
+                continue
+
+            page = doc[page_idx]
+            page_w = float(page.rect.width)
+
+            # Clip to the block's column half to prevent cross-column bleeding
+            if block.column == 0:
+                clip_x0 = 0.0
+                clip_x1 = page_w * 0.50
+            else:
+                clip_x0 = page_w * 0.50
+                clip_x1 = page_w
+
+            rect = fitz.Rect(
+                clip_x0,
+                block.bbox.y0,
+                clip_x1,
+                block.bbox.y1,
+            )
+
+            text = page.get_text("text", clip=rect).strip()
+
+            if text:
+                text = " ".join(text.split("\n"))
+                text = " ".join(text.split())
+                # Only replace body text blocks — heading blocks are short
+                # and correct from pdfplumber; replacing them causes Abstract
+                # to re-merge with its body text
+                if not block.is_heading:
+                    block.text = text
+
+        doc.close()
 
 
 def analyze_pdf(pdf_path: str) -> AnalyzedDocument:

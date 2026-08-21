@@ -69,29 +69,36 @@ def extract_multiple_sections(
 def build_superdocs_instruction(
     user_instruction: str,
     extracted: ExtractedSection,
+    full_document_text: str = "",
     include_word_hint: bool = True,
 ) -> str:
     """
-    Build the full instruction string sent to SuperDocs.
+    Build the instruction string sent to SuperDocs.
 
-    The word count is a hint, not a hard constraint —
-    the reflow engine handles whatever length SuperDocs returns.
+    Lean approach: just the user instruction + a minimal preservation note.
+    The uploaded document IS the section — SuperDocs knows to edit that.
+    Full document context goes in as brief background only when provided.
     """
-    parts = [
-        "IMPORTANT: Preserve all citation markers exactly as they appear, "
-        "such as [1], [2], (Smith et al., 2020), \\cite{key}, etc. "
-        "Do not add, remove, or alter any citation. "
-        "Preserve all technical terminology exactly. "
-        "Do not add new claims, results, or references that are not in the original text.",
-        "",
-        user_instruction,
-    ]
+    parts = []
+
+    # Optional brief context (paper summary, not the full doc)
+    if full_document_text:
+        doc_words = full_document_text.split()
+        if len(doc_words) > 6000:
+            context_text = " ".join(doc_words[:6000]) + "\n[truncated]"
+        else:
+            context_text = full_document_text
+        parts.append(
+            f"Background context (read-only, do not reproduce in output):\n{context_text}"
+        )
+
+    # The actual instruction
+    parts.append(user_instruction)
 
     if include_word_hint and extracted.word_count > 0:
         parts.append(
-            f"\nNote: The original text is approximately {extracted.word_count} words. "
-            "You may write more or less as needed — the layout engine will handle "
-            "reflowing the result. Focus on quality over length matching."
+            f"The original is approximately {extracted.word_count} words. "
+            "Length may vary as needed."
         )
 
-    return "\n".join(parts)
+    return "\n\n".join(parts)
