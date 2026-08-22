@@ -910,7 +910,15 @@ class PDFAnalyzer:
                 # and correct from pdfplumber; replacing them causes Abstract
                 # to re-merge with its body text
                 if not block.is_heading:
-                    block.text = text
+                    # Strip known heading prefixes that pymupdf picks up
+                    # when heading and body share the same y-position
+                    import re as _re
+                    text = _re.sub(
+                        r'^(Abstract|Keywords?|Index\s+Terms)[—\-:—\s]+',
+                        '', text, flags=_re.IGNORECASE
+                    ).strip()
+                    if text:
+                        block.text = text
 
         doc.close()
 

@@ -45,6 +45,7 @@ class FlowRegion:
     column: int
     bbox: BBox
     column_width: float
+    heading_bottom_y: float = 0.0   # y below which body text starts (0 = use bbox.y0)
 
     def capacity_lines(self, line_height: float) -> int:
         return max(1, int(self.bbox.height / line_height))
@@ -579,6 +580,22 @@ class FlowMapper:
         reg_y0   = blocks[0].bbox.y0
         reg_y1   = blocks[0].bbox.y1
 
+        # If the heading is on the same page/column as the first content block,
+        # only offset reg_y0 if the heading has a LARGER y0 than the content block
+        # (i.e., heading is visually before the content). For cases where they
+        # share the same y position (merged blocks), don't adjust.
+        if (section.heading_block and
+                section.heading_block.page == cur_page and
+                section.heading_block.column == cur_col):
+            hb = section.heading_block
+            hb_y0 = hb.bbox.y0
+            # Only offset if heading starts significantly before content
+            if hb_y0 < reg_y0 - 5:
+                heading_line_height = (hb.fontsize or grammar.body_fontsize) * 1.4
+                estimated_heading_end = hb_y0 + heading_line_height
+                if estimated_heading_end > reg_y0:
+                    reg_y0 = estimated_heading_end
+
         def col_x0(ci):
             return grammar.column_regions[ci].x0 if ci < len(grammar.column_regions) \
                 else grammar.column_regions[0].x0
@@ -591,22 +608,31 @@ class FlowMapper:
             return grammar.column_regions[ci].width if ci < len(grammar.column_regions) \
                 else grammar.column_regions[0].width
 
-        def flush():
+        def flush(is_first=False):
+            hby = 0.0
+            if is_first and section.heading_block:
+                hb = section.heading_block
+                if hb.page == cur_page and hb.column == cur_col:
+                    # Estimate one heading line height below heading y0
+                    hby = hb.bbox.y0 + (hb.fontsize or grammar.body_fontsize) * 1.5
             regions.append(FlowRegion(
                 page=cur_page, column=cur_col,
                 bbox=BBox(col_x0(cur_col), reg_y0, col_x1(cur_col), reg_y1),
                 column_width=col_w(cur_col),
+                heading_bottom_y=hby,
             ))
 
+        is_first_flush = [True]
         for b in blocks[1:]:
             if b.page == cur_page and b.column == cur_col:
                 reg_y1 = max(reg_y1, b.bbox.y1)
             else:
-                flush()
+                flush(is_first=is_first_flush[0])
+                is_first_flush[0] = False
                 cur_page, cur_col = b.page, b.column
                 reg_y0, reg_y1 = b.bbox.y0, b.bbox.y1
 
-        flush()
+        flush(is_first=is_first_flush[0])
         return regions
 
 

@@ -264,13 +264,14 @@ class ReflowEngine:
             pass
 
         # ------------------------------------------------------------------
-        # Step 6: Plan downstream shifts for overflow case
+        # Step 6: Downstream shifting DISABLED for MVP.
+        # Shifting downstream content across complex page layouts (last pages,
+        # two-column with references) produces incorrect redaction of non-target
+        # content. For now, just patch the section's own regions and accept
+        # minor gaps or slight overflow. The reflow engine architecture supports
+        # this feature but it needs per-layout calibration.
         # ------------------------------------------------------------------
-        if delta_points > 0 and not overflow_warnings:
-            # Sections after the edited section need to shift
-            downstream_shifts = self._plan_downstream_shifts(
-                section, delta_points, flow_map
-            )
+        # downstream_shifts = self._plan_downstream_shifts(...)  # deferred
 
         # Collect affected pages
         affected_pages = sorted(set(

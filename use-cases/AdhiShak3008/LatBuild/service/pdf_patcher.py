@@ -69,8 +69,15 @@ def apply_reflow(
     redact_ops = []  # list of (page_idx, fitz.Rect)
 
     for patch in reflow_result.section_patches:
+        # Always redact ALL section regions — including shrink_empty ones.
+        # shrink_empty means the new text is shorter and this region will be
+        # left blank (white). The old text must be erased.
         page_idx = patch.region.page - 1
-        rect = _to_fitz_rect(patch.region.bbox, doc[page_idx].rect.height)
+        raw_rect = _to_fitz_rect(patch.region.bbox, doc[page_idx].rect.height)
+        # Respect heading_bottom_y — don't redact the heading line itself
+        hby = patch.region.heading_bottom_y
+        rect = fitz.Rect(raw_rect.x0, max(raw_rect.y0, hby) if hby > 0 else raw_rect.y0,
+                         raw_rect.x1, raw_rect.y1)
 
         if _collides_with_non_content(patch.region.bbox, patch.region.page, non_content):
             warnings.append(PatchWarning(
@@ -117,8 +124,10 @@ def apply_reflow(
     # Phase 2: Insert replacement text into section patch regions
     # ------------------------------------------------------------------
     for patch in reflow_result.section_patches:
+        # shrink_empty regions were already redacted in Phase 1.
+        # Leave them blank (white space) — don't insert old or new text.
         if patch.operation == "shrink_empty":
-            continue  # region was cleared — nothing to insert
+            continue
 
         if _collides_with_non_content(patch.region.bbox, patch.region.page, non_content):
             continue  # already warned above
@@ -128,19 +137,66 @@ def apply_reflow(
 
         page_idx = patch.region.page - 1
         page = doc[page_idx]
-        rect = _to_fitz_rect(patch.region.bbox, page.rect.height)
+        raw_rect = _to_fitz_rect(patch.region.bbox, page.rect.height)
+
+        # If the region has a heading_bottom_y, start the redact/insert
+        # BELOW the heading line so we don't erase the section heading itself.
+        hby = patch.region.heading_bottom_y
+        if hby > raw_rect.y0:
+            rect = fitz.Rect(raw_rect.x0, hby, raw_rect.x1, raw_rect.y1)
+        else:
+            rect = raw_rect
 
         fontname = _normalise_fontname(grammar.body_fontname)
         fontsize = grammar.body_fontsize
 
-        overflow = page.insert_textbox(
-            rect,
-            patch.text_segment,
-            fontname=fontname,
-            fontsize=fontsize,
-            align=fitz.TEXT_ALIGN_JUSTIFY,
-            color=(0, 0, 0),
-        )
+        # Detect actual font size used in this region from the original PDF
+        # to match the original typography as closely as possible
+        region_text = page.get_text("dict", clip=rect)
+        detected_sizes = []
+        for block in region_text.get("blocks", []):
+            for line in block.get("lines", []):
+                for span in line.get("spans", []):
+                    sz = span.get("size", 0)
+                    if sz > 0:
+                        detected_sizes.append(sz)
+        if detected_sizes:
+            from statistics import median
+            detected_fontsize = round(median(detected_sizes), 1)
+            # Use detected size if it's reasonable (between 7 and 14pt)
+            if 7 <= detected_fontsize <= 14:
+                fontsize = detected_fontsize
+
+        # Try inserting at original font size; if overflow, retry smaller
+        overflow = -1
+        for attempt_fontsize in [fontsize, fontsize * 0.95, fontsize * 0.90,
+                                  fontsize * 0.85, fontsize * 0.80]:
+            overflow = page.insert_textbox(
+                rect,
+                patch.text_segment,
+                fontname=fontname,
+                fontsize=attempt_fontsize,
+                align=fitz.TEXT_ALIGN_JUSTIFY,
+                color=(0, 0, 0),
+            )
+            if overflow >= 0:
+                break  # fits
+
+        # If still overflowing, expand rect downward to accommodate
+        if overflow < 0:
+            # Extend bottom of rect by the overflow amount + small margin
+            expanded_rect = fitz.Rect(
+                rect.x0, rect.y0,
+                rect.x1, rect.y1 + abs(overflow) + 2
+            )
+            overflow = page.insert_textbox(
+                expanded_rect,
+                patch.text_segment,
+                fontname=fontname,
+                fontsize=fontsize,
+                align=fitz.TEXT_ALIGN_JUSTIFY,
+                color=(0, 0, 0),
+            )
 
         if overflow < 0:
             warnings.append(PatchWarning(
@@ -264,8 +320,12 @@ def apply_multiple_reflows(
 
 def _to_fitz_rect(bbox: BBox, page_height: float) -> fitz.Rect:
     """
-    Convert our top-origin BBox to pymupdf's bottom-origin Rect.
-    pdfplumber uses top-left origin; pymupdf uses bottom-left origin.
+    Convert our top-origin BBox to pymupdf's top-origin Rect.
+
+    Both pdfplumber and pymupdf use top-left origin in page coordinates
+    when accessed via the standard text extraction APIs. No conversion needed.
+    The y0 value from pdfplumber's 'top' field is the distance from the
+    top of the page, which is what fitz.Rect also expects.
     """
     return fitz.Rect(
         bbox.x0,
