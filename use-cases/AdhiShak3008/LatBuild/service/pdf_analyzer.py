@@ -177,6 +177,11 @@ _KEYWORD_RE = re.compile(
     r'^(index\s+terms|keywords?|key\s+words)\s*[\u2014:—]',
     re.IGNORECASE
 )
+# Numbered / Task headings: "TASK 1. ...", "1. ...", "2.1 ..."
+_TASK_NUMBER_RE = re.compile(
+    r'^(?:TASK\s+\d+|SECTION\s+\d+|\d+\.\d+|\d+\.)\s+[A-Z]',
+    re.IGNORECASE
+)
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +414,13 @@ class PDFAnalyzer:
         lx1 = max(w["x1"] for w in left_words)
         rx0 = min(w["x0"] for w in right_words)
         rx1 = max(w["x1"] for w in right_words)
+
+        # In a real two-column document, there MUST be a positive gutter (rx0 > lx1)
+        # where no words cross between columns.
+        if (rx0 - lx1) < 6.0:
+            x0 = min(w["x0"] for w in cw)
+            x1 = max(w["x1"] for w in cw)
+            return 0.0, [ColumnRegion(0, x0, x1, x1 - x0)], False
 
         cols = [
             ColumnRegion(0, lx0, lx1, lx1 - lx0),
@@ -738,6 +750,30 @@ class PDFAnalyzer:
 
         return parts if parts else [(text, block.is_heading)]
 
+    def _is_heading_line(self, line_text: str, grammar: DocumentGrammar) -> bool:
+        t = line_text.strip()
+        if not t or len(t) < 2:
+            return False
+        tn = re.sub(r'(?<=[A-Z]) (?=[A-Z])', '', t)
+
+        if _ROMAN_HEADING_RE.match(t) or _ROMAN_HEADING_RE.match(tn):
+            return True
+        if _ALPHA_HEADING_RE.match(t) and len(t.split()) <= 8:
+            return True
+        if _TASK_NUMBER_RE.match(t) and len(t.split()) <= 10:
+            return True
+        if _KEYWORD_RE.match(tn):
+            return True
+        bare = tn.lower().rstrip('.:—\u2014 ')
+        if bare in KNOWN_HEADINGS:
+            return True
+        words = t.split()
+        letters = [c for c in tn if c.isalpha()]
+        if letters and all(c.isupper() for c in letters) and 1 <= len(words) <= 8:
+            if "PAGE " not in t and "PAGE" not in words and "HTTP" not in t and "@" not in t:
+                return True
+        return False
+
     def _split_lines_on_headings(self, lines: list, grammar: DocumentGrammar) -> list:
         """
         Insert None sentinels before any line whose text starts with a
@@ -746,19 +782,15 @@ class PDFAnalyzer:
         """
         result = []
         for line in lines:
+            if not line:
+                continue
             # Split line at embedded Roman-numeral heading mid-text
             sub_lines = self._split_line_at_embedded_heading(line)
             for sub in sub_lines:
                 if not sub:
                     continue
                 line_text = " ".join(w["text"] for w in sub).strip()
-                tn = re.sub(r'(?<=[A-Z]) (?=[A-Z])', '', line_text)
-                is_hdg_line = bool(
-                    _ROMAN_HEADING_RE.match(line_text) or
-                    _ROMAN_HEADING_RE.match(tn) or
-                    (_ALPHA_HEADING_RE.match(line_text) and len(line_text.split()) <= 6) or
-                    _KEYWORD_RE.match(tn)
-                )
+                is_hdg_line = self._is_heading_line(line_text, grammar)
                 if is_hdg_line and result and result[-1] is not None:
                     result.append(None)   # force paragraph break before heading
                 result.append(sub)
@@ -872,40 +904,10 @@ class PDFAnalyzer:
         grammar: DocumentGrammar
     ) -> bool:
         t = text.strip()
-        # Normalise letter-spacing artifacts: "I N T R O D U C T I O N"
-        tn = re.sub(r'(?<=[A-Z]) (?=[A-Z])', '', t)
-        tl = tn.lower()
-
-        # IEEE Roman numeral section: "I.", "II.", "III." ...
-        if _ROMAN_HEADING_RE.match(t) or _ROMAN_HEADING_RE.match(tn):
+        if self._is_heading_line(t, grammar):
             return True
-
-        # IEEE alpha subsection: "A.", "B.", "C." followed by a word.
-        # MUST be short (≤ 8 words) to avoid matching reference entries like
-        # "L. A. Clarke and S. Buettcher, ..."
-        if _ALPHA_HEADING_RE.match(t) and len(t.split()) <= 8:
-            return True
-
-        # Keywords / Index Terms line
-        if _KEYWORD_RE.match(tn):
-            return True
-
-        # Exact known heading — use exact match only, not prefix,
-        # to avoid "keyword-based retrieval..." matching "keyword"
-        bare = tl.rstrip('.:—\u2014 ')
-        if bare in KNOWN_HEADINGS:
-            return True
-
-        # Larger than body AND bold
         if fontsize > grammar.body_fontsize + 1.5 and is_bold:
             return True
-
-        # ALL CAPS 2-8 word block (handles "PROJECT AVAILABILITY",
-        # "P ROJECT A VAILABILITY" after normalisation)
-        tn_nsp = tn.replace(" ", "")
-        if tn_nsp.isupper() and 2 <= len(tn.split()) <= 8:
-            return True
-
         return False
 
     # ------------------------------------------------------------------
@@ -916,6 +918,7 @@ class PDFAnalyzer:
         self, page_obj, page_num: int
     ) -> List[NonContentElement]:
         elements = []
+        pw, ph = float(page_obj.width), float(page_obj.height)
         for img in page_obj.images:
             elements.append(NonContentElement(
                 type="image", page=page_num,
@@ -924,9 +927,13 @@ class PDFAnalyzer:
             ))
         for tbl in page_obj.find_tables():
             b = tbl.bbox
+            tb = BBox(float(b[0]), float(b[1]), float(b[2]), float(b[3]))
+            # Ignore false-positive page border/margin tables that cover > 70% of page area
+            if tb.area >= (pw * ph * 0.70):
+                continue
             elements.append(NonContentElement(
                 type="table", page=page_num,
-                bbox=BBox(float(b[0]), float(b[1]), float(b[2]), float(b[3])),
+                bbox=tb,
             ))
         return elements
 

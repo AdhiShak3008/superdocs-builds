@@ -31,6 +31,7 @@ from pdf_analyzer import (
     AnalyzedDocument, TextBlock, NonContentElement,
     BBox, ColumnRegion, DocumentGrammar,
     KNOWN_HEADINGS, _ROMAN_HEADING_RE, _ALPHA_HEADING_RE, _KEYWORD_RE,
+    _TASK_NUMBER_RE,
 )
 
 
@@ -98,30 +99,36 @@ class Section:
 
     @property
     def pages(self) -> List[int]:
-        ps = set()
+        pgs = set()
         if self.heading_block:
-            ps.add(self.heading_block.page)
+            pgs.add(self.heading_block.page)
         for b in self.content_blocks:
-            ps.add(b.page)
-        return sorted(ps)
+            pgs.add(b.page)
+        return sorted(pgs) if pgs else [1]
 
     @property
     def start_page(self) -> int:
-        return self.pages[0] if self.pages else 0
+        return min(self.pages)
 
     @property
     def end_page(self) -> int:
-        return self.pages[-1] if self.pages else 0
+        return max(self.pages)
 
     @property
     def reading_start(self) -> int:
         if self.heading_block:
             return self.heading_block.reading_order
-        return self.content_blocks[0].reading_order if self.content_blocks else 0
+        if self.content_blocks:
+            return self.content_blocks[0].reading_order
+        return 0
 
     @property
     def reading_end(self) -> int:
-        return self.content_blocks[-1].reading_order if self.content_blocks else self.reading_start
+        if self.content_blocks:
+            return self.content_blocks[-1].reading_order
+        if self.heading_block:
+            return self.heading_block.reading_order
+        return 0
 
 
 @dataclass
@@ -135,7 +142,7 @@ class DocumentFlowMap:
 
     def get_section(self, title_or_id: str) -> Optional[Section]:
         for s in self.sections:
-            if s.title == title_or_id or s.id == title_or_id:
+            if s.id == title_or_id or s.title.lower() == title_or_id.lower():
                 return s
         return None
 
@@ -150,14 +157,35 @@ class DocumentFlowMap:
                 if s.parent_id == section.id and s.level == section.level + 1]
 
     def sections_after(self, section: Section) -> List[Section]:
-        found = False
-        result = []
+        """Return all editable sections that appear after this one in reading order."""
+        try:
+            idx = self.sections.index(section)
+            return [s for s in self.sections[idx + 1:] if s.is_editable]
+        except ValueError:
+            return []
+
+    def section_hierarchy(self) -> List[dict]:
+        """Return nested tree representation for UI display."""
+        tree = []
+        l1_map = {}
         for s in self.sections:
-            if found:
-                result.append(s)
-            if s.id == section.id:
-                found = True
-        return result
+            node = {
+                "id": s.id,
+                "title": s.title,
+                "level": s.level,
+                "pages": s.pages,
+                "word_count": s.word_count,
+                "is_editable": s.is_editable,
+                "children": [],
+            }
+            if s.level == 1:
+                tree.append(node)
+                l1_map[s.id] = node
+            elif s.level == 2 and s.parent_id and s.parent_id in l1_map:
+                l1_map[s.parent_id]["children"].append(node)
+            else:
+                tree.append(node)
+        return tree
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +204,7 @@ NON_EDITABLE = {
 
 def _heading_level(text: str) -> int:
     """
-    Return 1 for top-level IEEE headings, 2 for subsections, 0 for body text.
+    Return 1 for top-level headings, 2 for subsections, 0 for body text.
     """
     t  = text.strip()
     tn = re.sub(r'(?<=[A-Z]) (?=[A-Z])', '', t)
@@ -195,14 +223,25 @@ def _heading_level(text: str) -> int:
         "keyword", "key words", "summary", "appendix",
         "future work", "discussion",
     }
-    if tl in TOP_WORDS:
-        return 1
-    if _KEYWORD_RE.match(tn):
+    if tl in TOP_WORDS or _KEYWORD_RE.match(tn):
         return 1
 
-    # Alpha subsection → level 2
-    if _ALPHA_HEADING_RE.match(t):
+    # Subsections (2.1, A., etc.)
+    if re.match(r'^\d+\.\d+\s+[A-Z]', t):
         return 2
+    if _ALPHA_HEADING_RE.match(t) and len(t.split()) <= 8:
+        return 2
+
+    # Numeric sections (1., TASK 1., etc.)
+    if _TASK_NUMBER_RE.match(t):
+        return 1
+
+    # ALL CAPS line (1 to 8 words)
+    words = t.split()
+    letters = [c for c in tn if c.isalpha()]
+    if letters and all(c.isupper() for c in letters) and 1 <= len(words) <= 8:
+        if "PAGE " not in t and "PAGE" not in words and "HTTP" not in t and "@" not in t:
+            return 1
 
     return 0
 

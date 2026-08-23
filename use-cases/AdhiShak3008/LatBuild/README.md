@@ -1,6 +1,6 @@
 # LatBuild — SuperDocs PDF Companion
 
-A SuperDocs-powered surgical PDF editing tool that lets you rewrite any section of an existing PDF while preserving the original document's visual layout, columns, fonts, figures, and structure.
+A SuperDocs-powered surgical PDF editing tool that lets you rewrite any section of an existing PDF while preserving the original document's visual layout, columns, typography, figures, and page structure.
 
 **Built for:** The SuperDocs Engineer Task — Round 2  
 **Author:** AdhiShak3008
@@ -9,16 +9,17 @@ A SuperDocs-powered surgical PDF editing tool that lets you rewrite any section 
 
 ## The Problem
 
-When you upload an 11-page IEEE paper to SuperDocs and ask it to rewrite the Abstract, the AI editing works correctly — but the exported document loses the IEEE two-column layout and becomes a 24-page wall of prose.
+When you upload an 11-page IEEE two-column paper to standard AI editors and ask to rewrite a section (such as the Abstract or Introduction), the exported document often loses the two-column grid, reflows uncontrollably, and distorts the document geometry into an unformatted wall of prose.
 
-**The semantic edit succeeds. Document fidelity fails.**
+**The semantic edit succeeds, but physical document fidelity fails.**
 
-LatBuild solves this by keeping SuperDocs responsible for the text transformation and keeping the application responsible for document surgery.
+LatBuild solves this by keeping SuperDocs responsible for the high-quality prose transformation while LatBuild performs deterministic PDF surgery:
 
 ```
-SuperDocs sees:   pure text
-SuperDocs returns: pure text
-LatBuild does:    everything else
+SuperDocs sees:   clean section prose
+SuperDocs returns: edited section prose
+LatBuild does:    layout analysis, flow region mapping, typography calibration, 
+                  two-column reflow, immutable redaction, and fidelity verification
 ```
 
 ---
@@ -28,43 +29,45 @@ LatBuild does:    everything else
 ```
 Upload PDF
   ↓
-PDF Analyzer (pdfplumber)
-  ↓ extracts: columns, margins, fonts, headings, text blocks
+PDF Analyzer (pdfplumber + PyMuPDF)
+  ↓ extracts: columns, gutters, margins, fonts, line height, headings, text blocks, preamble
 DocumentFlowMap
-  ↓ maps: sections → ordered text blocks → flow regions
-User selects sections
+  ↓ maps: sections → ordered text blocks → continuous flow regions
+User selects sections & enters instructions (global or per-section)
   ↓
-Section Extractor → clean prose per section
-  ↓
-SuperDocs API (upload → chat → approve → export)
-  ↓ returns: rewritten prose
+Section Extractor
+  ↓ extracts clean prose per section + calculates layout word budget (±5%)
+SuperDocs API (upload .docx → async transformation → structured changes)
+  ↓ returns: proposed edits / transformed text
+Diff Review & Approval
+  ↓ user approves / rejects changes per section
 Reflow Engine
-  ↓ measures replacement, distributes across flow regions
-  ↓ plans downstream shifts if section grew/shrank
-PDF Patcher (pymupdf)
-  ↓ redacts original regions, inserts replacement text
-  ↓ redraws shifted downstream content
-  ↓ NEVER touches figures, tables, or non-content elements
+  ↓ measures replacement typography, formats paragraphs, distributes across flow regions
+PDF Patcher (PyMuPDF)
+  ↓ redacts original regions, inserts replacement text with calibrated line height
+  ↓ NEVER touches figures, tables, headers, or non-target pages (strict invariant)
 Fidelity Checker
-  ↓ pixel-compares original vs modified
-  ↓ verifies changes localized to selected sections
+  ↓ pixel-level and structural validation (page count, figures preserved, non-target pages untouched)
 Download modified PDF
 ```
 
 ---
 
-## What Makes This Different
+## Key Capabilities & Engineering Highlights
 
-**SuperDocs does NOT edit the PDF.**
+### 1. Two-Column & Multi-Page Flow Management
+- **True Gutter Detection**: Employs zero-count histogram binning across page centers to identify the exact column gutter (e.g. 12pt IEEE standard), preventing column squishing or text collision.
+- **Top Header Banner Isolation**: Automatically isolates top title and author blocks spanning across Page 1 columns so they are never absorbed into body sections.
+- **Continuous Cross-Column / Cross-Page Reflow**: Seamlessly distributes multi-paragraph rewrites across Column 0, Column 1, and subsequent pages (e.g. Introduction or Conclusion spanning Pages 1–2 or Pages 11–12).
 
-SuperDocs receives plain text extracted from the selected section. It returns rewritten plain text. It has no knowledge of PDF coordinates, columns, fonts, or layout.
+### 2. Typography & Layout Calibration
+- **LaTeX-Matched Baseline Pitch**: Calibrates line-height ratios (`1.12–1.15`) and paragraph breaks (`re.sub(r'\n{2,}', '\n', ...)`) to match authentic IEEE LaTeX typesetting, eliminating artificial overflow or trailing white gaps.
+- **Inline Run-in Heading Support**: Special handling for inline headings (`Abstract —`, `Keywords —`) starting from line 0 without duplicate text artifacts.
+- **Unicode Font Safety**: Automatically sanitizes unicode em-dashes and en-dashes (`\u2014` → `--`) for standard PDF fonts, preventing question mark (`?`) rendering artifacts.
 
-LatBuild's reflow engine takes the rewritten text and:
-1. Measures how many lines it needs at the section's typography
-2. Fills the original flow regions sequentially
-3. If the replacement is longer, extends into downstream space and shifts subsequent sections accordingly
-4. If the replacement is shorter, the remaining region is cleared (empty space at section end)
-5. Detects and refuses to overwrite figures, tables, or images (hard invariant)
+### 3. Resilient Change Mapping & Review
+- **Multi-Tier Span Matching**: Uses exact substring, token-normalized window comparison, and fuzzy `SequenceMatcher` fallback to cleanly map SuperDocs diffs back to the original manuscript without mapping errors.
+- **Granular Decision Control**: Users can review original vs. proposed text per section, approving or rejecting changes individually before applying them to the PDF.
 
 ---
 
@@ -72,141 +75,97 @@ LatBuild's reflow engine takes the rewritten text and:
 
 ```
 service/
-├── pdf_analyzer.py       — pdfplumber: layout, grammar, text blocks
+├── pdf_analyzer.py       — pdfplumber & PyMuPDF: layout geometry, grammar, headings, text blocks
 ├── flow_mapper.py        — sections, FlowRegions, DocumentFlowMap
-├── section_extractor.py  — clean prose extraction, word budget
-├── docx_bridge.py        — prose ↔ .docx (for SuperDocs API)
-├── superdocs_client.py   — SuperDocs REST API (unchanged from preprint app)
-├── reflow_engine.py      — text measurement, flow distribution, shift planning
-├── pdf_patcher.py        — pymupdf: redact + redraw, non-content invariant
-├── fidelity_checker.py   — pixel diff, structural validation, report
-└── app.py                — Flask: all routes and orchestration
+├── section_extractor.py  — clean prose extraction, word budget calculation (±5%)
+├── docx_bridge.py        — prose ↔ .docx roundtrip (for SuperDocs API)
+├── superdocs_client.py   — SuperDocs REST API integration (upload, async chat, poll, approve)
+├── reflow_engine.py      — text measurement, region capacity, cross-column distribution
+├── pdf_patcher.py        — PyMuPDF: atomic redaction + insertion, typography rendering
+├── fidelity_checker.py   — pixel diff, structural validation, fidelity reporting
+└── app.py                — Flask backend: routing, session state, review UI, and orchestration
 ```
 
-**Key data structures:**
-
-- `DocumentGrammar` — the PDF's visual rules (fonts, margins, columns, line height)
-- `DocumentFlowMap` — the entire document as ordered sections → flow regions
-- `FlowRegion` — a physical container (page + column + bbox) that content flows through
-- `ReflowResult` — the complete plan: patches, downstream shifts, overflow warnings
-- `FidelityReport` — pixel-level validation of what changed and what didn't
-
----
-
-## SuperDocs Integration
-
-| Operation | Endpoint | Purpose |
-|---|---|---|
-| Upload section | `POST /v1/documents/upload` | Send section prose as .docx |
-| Start edit | `POST /v1/chat/async` | Send user instruction |
-| Poll | `GET /v1/jobs/{job_id}` | Wait for rewrite |
-| Approve | `POST /v1/chat/{session_id}/approve` | Accept proposed changes |
-| Export | `POST /v1/documents/export` | Get rewritten prose back as .docx |
-
-Multiple sections are processed in parallel using `ThreadPoolExecutor`. Each section gets its own independent SuperDocs session.
-
-**The SuperDocs export is NOT the final PDF.** It is used only to extract the rewritten text. LatBuild applies that text to the original PDF.
+**Core Data Structures:**
+- `DocumentGrammar`: Visual specifications of the document (body font, size, line height, margins, column count, gutter width).
+- `DocumentFlowMap`: Ordered map of document sections linked to physical `FlowRegion` bounding boxes.
+- `FlowRegion`: Physical bounding box (`page`, `column`, `bbox`, `heading_bottom_y`) through which replacement prose flows.
+- `ReflowResult`: Complete plan containing section patches, capacity verification, and overflow status.
+- `FidelityReport`: Verification report proving non-target pages, figures, and total page counts remain 100% intact.
 
 ---
 
-## Setup
+## Setup & Running
 
 ### Prerequisites
 - Python 3.10+
 - SuperDocs API key from [use.superdocs.app](https://use.superdocs.app)
 
-### Install
+### 1. Install Dependencies
 
 ```powershell
 cd use-cases/AdhiShak3008/LatBuild/service
 python -m venv .venv
-.venv\Scripts\activate          # Windows
+.venv\Scripts\activate          # Windows PowerShell
 # source .venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 ```
 
-### Configure
+### 2. Configure Environment
 
-```powershell
-copy .env.example .env
-# Edit .env and set SUPERDOCS_API_KEY=your-key-here
+Create a `.env` file in `use-cases/AdhiShak3008/LatBuild/service/` or `LatBuild/`:
+```env
+SUPERDOCS_API_KEY=your_actual_api_key_here
 ```
 
-### Run
+### 3. Start the Application
 
 ```powershell
 # Windows PowerShell:
-$env:SUPERDOCS_API_KEY = "your-key-here"
-python app.py
+Get-ChildItem -Path . -Include __pycache__, .pytest_cache -Recurse -Force | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; python app.py
 
 # macOS/Linux:
-export SUPERDOCS_API_KEY=your-key-here
 python app.py
 ```
 
-Open [http://localhost:5001](http://localhost:5001)
-
----
-
-## Browser Extension
-
-The Chrome/Edge extension provides a one-click launcher for the service.
-
-**Install:**
-1. Open `chrome://extensions`
-2. Enable Developer mode
-3. Click "Load unpacked"
-4. Select the `extension/` folder
-
-The extension opens the service UI in a new tab. All PDF processing happens locally in the service — the extension is a thin launcher only.
+Open [http://localhost:5001](http://localhost:5001) in your browser.
 
 ---
 
 ## Running Tests
 
-Tests run without a live SuperDocs API key or a real PDF.
+All 91 unit, integration, and golden regression tests run standalone:
 
 ```powershell
-cd use-cases/AdhiShak3008/LatBuild/service
-pytest ../tests/ -v
+cd use-cases/AdhiShak3008/LatBuild
+pytest -v
 ```
 
-Test coverage:
-- `test_pdf_analyzer.py` — column detection, heading classification, BBox geometry
-- `test_flow_mapper.py` — section detection, flow region building, DocumentFlowMap
-- `test_reflow_engine.py` — text measurement, region filling, overflow, non-content invariant
-- `test_section_extractor.py` — prose extraction, instruction building
-- `test_docx_bridge.py` — prose ↔ .docx roundtrip, HTML text extraction
+### Test Suites Included:
+- `test_pdf_analyzer.py` — Column detection, valley histograms, heading classification, BBox geometry.
+- `test_flow_mapper.py` — Section grouping, flow region construction, inline heading boundaries.
+- `test_reflow_engine.py` — Typography measurement, region capacity, multi-paragraph distribution.
+- `test_section_extractor.py` — Prose extraction, instruction construction, word count hints.
+- `test_docx_bridge.py` — DOCX/HTML roundtrip conversion, citation preservation.
+- `test_golden_pilotmaster.py` — End-to-end regression tests on 12-page IEEE paper `PilotMaster.pdf`.
+- `test_comprehensive_reflow.py` — Transactional safety, rollback on overflow, multi-section atomicity.
 
 ---
 
-## Supported PDFs
+## Supported Document Types
 
-- Digitally generated PDFs with selectable text
-- Single and two-column layouts
-- Academic papers (IEEE, ACM, Springer, etc.)
-- Reports, manuals, business documents
-
-**Not supported (explicit):**
-- Scanned PDFs (no selectable text layer)
-- Encrypted/password-protected PDFs
-- PDFs with equations as images (not selectable text)
-- Right-to-left scripts
+- **Supported**:
+  - Digitally generated PDFs with selectable text
+  - Multi-column and single-column academic papers (IEEE, ACM, Springer, etc.)
+  - Reports, preprints, journals, and multi-page technical manuscripts
+- **Explicit Exclusions**:
+  - Scanned PDFs without selectable text (requires OCR preprocessing)
+  - Password-protected or encrypted PDFs
+  - Right-to-left scripts (RTL)
 
 ---
 
-## Known Limitations
+## License & Attribution
 
-1. **Font matching**: Replacement text uses standard fonts (Times-Roman, Helvetica, Courier). If the original PDF uses a proprietary embedded font, character metrics will differ slightly from the original.
-2. **Reflow across page boundaries**: If a section's replacement text is dramatically longer and pushes content past the last page, a new page is added with standard margins.
-3. **Figures anchored**: Inline figures that flow with text are treated as absolute-position elements. If text grows past a figure, the figure stays and the overflow is reported.
-4. **Single-file PDFs**: Multi-file LaTeX projects must be compiled to a single PDF first.
-5. **In-memory state**: Session state is lost on server restart (appropriate for local use).
-
----
-
-## Screenshot
-
-Upload page → section detection → select sections → enter instruction → review before/after per section → approve → fidelity report → download.
-
-Built for the SuperDocs Engineer Task, Round 2.
+Built for the **SuperDocs Engineer Task — Round 2**.  
+Created by **AdhiShak3008**.
