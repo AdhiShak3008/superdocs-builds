@@ -65,7 +65,31 @@ class Section:
     @property
     def full_text(self) -> str:
         from text_normalizer import normalize_section_text
-        raw = "\n\n".join(b.text for b in self.content_blocks).strip()
+        if not self.content_blocks:
+            return ""
+        
+        parts = []
+        for i, b in enumerate(self.content_blocks):
+            txt = b.text.strip()
+            if not txt:
+                continue
+            if not parts:
+                parts.append(txt)
+            else:
+                prev = parts[-1]
+                # Check if prev and txt should be joined as the same paragraph/sentence
+                # across column or page breaks.
+                prev_ends_terminal = bool(re.search(r'[.?!:;”"]$', prev))
+                curr_starts_lower = bool(re.match(r'^[a-z]', txt))
+                
+                if not prev_ends_terminal or curr_starts_lower:
+                    # Same paragraph continuation across column/page boundary
+                    parts[-1] = f"{prev} {txt}"
+                else:
+                    # Distinct paragraph
+                    parts.append(txt)
+                    
+        raw = "\n\n".join(parts).strip()
         return normalize_section_text(raw)
 
     @property
@@ -252,9 +276,19 @@ def _make_id(title: str, parent_id: Optional[str] = None) -> str:
 class FlowMapper:
 
     def build(self, doc: AnalyzedDocument) -> DocumentFlowMap:
+        self._all_blocks_for_geometry = doc.all_blocks
+        self._page_heights = {p.page_number: float(p.height) for p in doc.pages}
+        self._non_content_for_geometry = doc.non_content
         sections = self._detect_sections(doc.all_blocks, doc.grammar)
-        for s in sections:
-            s.flow_regions = self._build_flow_regions(s, doc.grammar)
+
+        # The writable area of a section is bounded by the next section,
+        # not by the bottom of the old text occupying that area.
+        for i, section in enumerate(sections):
+            next_section = sections[i + 1] if i + 1 < len(sections) else None
+            section.flow_regions = self._build_flow_regions(
+                section, doc.grammar, next_section
+            )
+
         return DocumentFlowMap(
             grammar=doc.grammar,
             sections=sections,
@@ -556,84 +590,174 @@ class FlowMapper:
     # ------------------------------------------------------------------
 
     def _build_flow_regions(
-        self, section: Section, grammar: DocumentGrammar
+        self,
+        section: Section,
+        grammar: DocumentGrammar,
+        next_section: Optional[Section] = None,
     ) -> List[FlowRegion]:
-        blocks = section.content_blocks
-        if not blocks:
-            if section.heading_block:
-                hb = section.heading_block
-                col_idx = hb.column
-                col = (grammar.column_regions[col_idx]
-                       if col_idx < len(grammar.column_regions)
-                       else grammar.column_regions[0])
-                return [FlowRegion(
-                    page=hb.page, column=col_idx,
-                    bbox=BBox(col.x0, hb.bbox.y1, col.x1,
-                              hb.bbox.y1 + grammar.body_line_height * 3),
-                    column_width=col.width,
-                )]
+        """
+        Build physical writable regions for a section.
+
+        IMPORTANT:
+        The old implementation stopped a section at the bottom of its last
+        paragraph.  That made every replacement effectively immutable to the
+        original text height, even when there was genuine unused space below
+        the section.
+
+        A section may consume all unused space in its own physical column.
+        Its hard boundary is therefore the first later block in the SAME
+        page/column, or the bottom margin/page edge when no later block exists
+        in that column.
+
+        We never use a block from the other column as a vertical boundary.
+        That is essential for IEEE two-column PDFs.
+        """
+        if not grammar.column_regions:
             return []
 
-        regions: List[FlowRegion] = []
-        cur_page = blocks[0].page
-        cur_col  = blocks[0].column
-        reg_y0   = blocks[0].bbox.y0
-        reg_y1   = blocks[0].bbox.y1
+        blocks = section.content_blocks
 
-        # If the heading is on the same page/column as the first content block,
-        # only offset reg_y0 if the heading has a LARGER y0 than the content block
-        # (i.e., heading is visually before the content). For cases where they
-        # share the same y position (merged blocks), don't adjust.
-        if (section.heading_block and
-                section.heading_block.page == cur_page and
-                section.heading_block.column == cur_col):
+        def col_region(ci: int) -> ColumnRegion:
+            if 0 <= ci < len(grammar.column_regions):
+                return grammar.column_regions[ci]
+            return grammar.column_regions[0]
+
+        def later_same_column_boundary(
+            page: int,
+            column: int,
+            current_bottom: float,
+        ) -> float:
+            """Return the first safe vertical boundary after current_bottom."""
+            candidates = []
+
+            section_end = section.reading_end
+
+            # A later text block in the same physical column is a hard boundary.
+            for block in getattr(self, "_all_blocks_for_geometry", []):
+                if block.page != page or block.column != column:
+                    continue
+                if block.reading_order <= section_end:
+                    continue
+                top = float(block.bbox.y0)
+                if top > current_bottom + 0.01:
+                    candidates.append(top)
+
+            # Images/tables are also hard boundaries. Never paint through them.
+            for elem in getattr(self, "_non_content_for_geometry", []):
+                if elem.page != page:
+                    continue
+                # Only treat an element as an obstacle when it occupies this
+                # physical column horizontally.
+                if elem.bbox.x1 <= col_region(column).x0:
+                    continue
+                if elem.bbox.x0 >= col_region(column).x1:
+                    continue
+                top = float(elem.bbox.y0)
+                if top > current_bottom + 0.01:
+                    candidates.append(top)
+
+            if candidates:
+                return min(candidates)
+
+            # No later content in this column: the page bottom/margin is the
+            # remaining writable area.
+            page_height = float(
+                getattr(self, "_page_heights", {}).get(page, 0.0)
+            )
+            if page_height > current_bottom:
+                return max(
+                    current_bottom,
+                    page_height - float(grammar.margin_bottom),
+                )
+
+            # Fallback for callers that construct a mapper without page data.
+            return current_bottom
+
+        if not blocks:
+            if not section.heading_block:
+                return []
+
             hb = section.heading_block
-            hb_y0 = hb.bbox.y0
-            # Only offset if heading starts significantly before content
-            if hb_y0 < reg_y0 - 5:
-                heading_line_height = (hb.fontsize or grammar.body_fontsize) * 1.4
-                estimated_heading_end = hb_y0 + heading_line_height
-                if estimated_heading_end > reg_y0:
-                    reg_y0 = estimated_heading_end
+            ci = hb.column if 0 <= hb.column < len(grammar.column_regions) else 0
+            col = col_region(ci)
+            hb_y1 = max(float(hb.bbox.y0), float(hb.bbox.y1))
+            y0 = hb_y1
+            y1 = later_same_column_boundary(hb.page, ci, y0)
 
-        def col_x0(ci):
-            return grammar.column_regions[ci].x0 if ci < len(grammar.column_regions) \
-                else grammar.column_regions[0].x0
+            if y1 <= y0:
+                page_height = float(getattr(self, "_page_heights", {}).get(hb.page, grammar.page_height))
+                y1 = max(y0 + grammar.body_line_height, page_height - float(grammar.margin_bottom))
 
-        def col_x1(ci):
-            return grammar.column_regions[ci].x1 if ci < len(grammar.column_regions) \
-                else grammar.column_regions[0].x1
+            if y1 <= y0:
+                return []
 
-        def col_w(ci):
-            return grammar.column_regions[ci].width if ci < len(grammar.column_regions) \
-                else grammar.column_regions[0].width
+            return [FlowRegion(
+                page=hb.page,
+                column=ci,
+                bbox=BBox(col.x0, y0, col.x1, y1),
+                column_width=col.width,
+                heading_bottom_y=hb_y1,
+            )]
 
-        def flush(is_first=False):
-            hby = 0.0
-            if is_first and section.heading_block:
-                hb = section.heading_block
-                if hb.page == cur_page and hb.column == cur_col:
-                    # Estimate one heading line height below heading y0
-                    hby = hb.bbox.y0 + (hb.fontsize or grammar.body_fontsize) * 1.5
+        # Group the section's existing body blocks by physical page/column.
+        groups: List[List[TextBlock]] = []
+        current: List[TextBlock] = []
+        cur_page = None
+        cur_col = None
+
+        for block in blocks:
+            if not current:
+                current = [block]
+                cur_page = block.page
+                cur_col = block.column
+            elif block.page == cur_page and block.column == cur_col:
+                current.append(block)
+            else:
+                groups.append(current)
+                current = [block]
+                cur_page = block.page
+                cur_col = block.column
+
+        if current:
+            groups.append(current)
+
+        regions: List[FlowRegion] = []
+
+        for idx, group in enumerate(groups):
+            first = group[0]
+            page = first.page
+            column = first.column
+            col = col_region(column)
+
+            y0 = min(min(float(b.bbox.y0), float(b.bbox.y1)) for b in group)
+            y1 = max(max(float(b.bbox.y0), float(b.bbox.y1)) for b in group)
+            heading_bottom = 0.0
+
+            if (
+                idx == 0
+                and section.heading_block
+                and section.heading_block.page == page
+                and section.heading_block.column == column
+            ):
+                heading_bottom = max(float(section.heading_block.bbox.y0), float(section.heading_block.bbox.y1))
+                y0 = max(y0, heading_bottom)
+
+            # Extend through genuinely unused space until the next physical obstacle in this column
+            y1 = later_same_column_boundary(page, column, y1)
+
+            if y1 <= y0:
+                continue
+
             regions.append(FlowRegion(
-                page=cur_page, column=cur_col,
-                bbox=BBox(col_x0(cur_col), reg_y0, col_x1(cur_col), reg_y1),
-                column_width=col_w(cur_col),
-                heading_bottom_y=hby,
+                page=page,
+                column=column,
+                bbox=BBox(col.x0, y0, col.x1, y1),
+                column_width=col.width,
+                heading_bottom_y=heading_bottom,
             ))
 
-        is_first_flush = [True]
-        for b in blocks[1:]:
-            if b.page == cur_page and b.column == cur_col:
-                reg_y1 = max(reg_y1, b.bbox.y1)
-            else:
-                flush(is_first=is_first_flush[0])
-                is_first_flush[0] = False
-                cur_page, cur_col = b.page, b.column
-                reg_y0, reg_y1 = b.bbox.y0, b.bbox.y1
-
-        flush(is_first=is_first_flush[0])
         return regions
+
 
 
 def build_flow_map(doc: AnalyzedDocument) -> DocumentFlowMap:

@@ -1,11 +1,10 @@
 """
 docx_bridge.py
-Convert plain text to/from .docx for the SuperDocs API.
+Convert PDF-derived section prose into a contextual DOCX for SuperDocs.
 
-SuperDocs requires a .docx upload. This module handles the minimal
-conversion needed: prose → .docx for upload, .docx → prose after export.
-
-Keeps the conversion simple and lossless for plain prose.
+The whole paper is sent to SuperDocs for context, but selected sections are
+wrapped in explicit LatBuild boundary markers. Those markers are temporary
+transport metadata and are never written back to the PDF.
 """
 
 import io
@@ -16,26 +15,75 @@ from html.parser import HTMLParser
 
 
 def prose_to_docx(text: str, title: str = "Section") -> bytes:
-    """
-    Convert plain text to a minimal .docx file.
-    Paragraphs are separated by double newlines.
-    Returns raw bytes of the .docx file.
-    """
+    """Convert plain text to a minimal .docx file."""
     doc = Document()
-
-    # Remove default empty paragraph
-    for para in doc.paragraphs:
-        p = para._element
-        p.getparent().remove(p)
+    for para in list(doc.paragraphs):
+        para._element.getparent().remove(para._element)
 
     paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-
     if not paragraphs:
         paragraphs = [text.strip()] if text.strip() else ["(empty)"]
 
     for para_text in paragraphs:
-        para = doc.add_paragraph(para_text)
-        para.style.font.size = Pt(11)
+        p = doc.add_paragraph(para_text)
+        p.style.font.size = Pt(11)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _marker_id(title: str) -> str:
+    """Stable readable marker token for a section title."""
+    token = re.sub(r"[^A-Za-z0-9]+", "_", title).strip("_").upper()
+    return token or "SECTION"
+
+
+def full_paper_to_docx(fm, target_section_titles: list) -> bytes:
+    """
+    Build the entire paper for SuperDocs.
+
+    Every selected section receives explicit START/END transport markers.
+    SuperDocs can therefore read the whole paper while LatBuild retains an
+    unambiguous semantic boundary around every authorized write target.
+    """
+    targets = set(target_section_titles or [])
+    doc = Document()
+
+    for para in list(doc.paragraphs):
+        para._element.getparent().remove(para._element)
+
+    for section in fm.sections:
+        if not section.full_text and not section.heading_block:
+            continue
+
+        selected = section.title in targets
+        marker = _marker_id(section.title)
+
+        if selected:
+            start = doc.add_paragraph(
+                f"[[LATBUILD_SECTION_START:{marker}]]"
+            )
+            start.style.font.size = Pt(7)
+
+        h = doc.add_heading(section.title, level=section.level)
+        h.style.font.size = Pt(11)
+
+        if section.full_text:
+            paragraphs = [
+                p.strip()
+                for p in section.full_text.split("\n\n")
+                if p.strip()
+            ]
+            for para_text in paragraphs:
+                p = doc.add_paragraph(para_text)
+                p.style.font.size = Pt(10)
+
+        if selected:
+            end = doc.add_paragraph(
+                f"[[LATBUILD_SECTION_END:{marker}]]"
+            )
+            end.style.font.size = Pt(7)
 
     buf = io.BytesIO()
     doc.save(buf)
@@ -69,32 +117,20 @@ class _HTMLTextExtractor(HTMLParser):
 
 
 def extract_text_from_docx(docx_bytes: bytes) -> str:
-    """
-    Extract plain text from .docx bytes.
-    Returns paragraphs joined with double newlines.
-    """
+    """Extract plain text from .docx bytes."""
     buf = io.BytesIO(docx_bytes)
     doc = Document(buf)
-    paragraphs = []
-    for para in doc.paragraphs:
-        text = para.text.strip()
-        if text:
-            paragraphs.append(text)
+    paragraphs = [para.text.strip() for para in doc.paragraphs if para.text.strip()]
     return "\n\n".join(paragraphs)
 
 
 def extract_text_from_html(html: str) -> str:
-    """
-    Extract plain text from SuperDocs' returned HTML.
-    Used when we want to pull rewritten prose from the job result HTML.
-    """
+    """Extract plain text from SuperDocs HTML."""
     extractor = _HTMLTextExtractor()
     extractor.feed(html)
     raw = extractor.get_text()
 
-    # Normalise whitespace
     lines = [line.strip() for line in raw.split("\n")]
-    # Collapse multiple blank lines into paragraph breaks
     cleaned = []
     blank_count = 0
     for line in lines:
@@ -109,3 +145,33 @@ def extract_text_from_html(html: str) -> str:
     return "\n\n".join(
         para for para in "\n".join(cleaned).split("\n\n") if para.strip()
     )
+
+
+def extract_marked_section_from_text(
+    full_text: str, section_title: str
+) -> str | None:
+    """
+    Extract the text between LatBuild START/END markers.
+
+    Returns None when the markers are absent or malformed. We intentionally
+    fail closed instead of guessing a section boundary.
+    """
+    marker = _marker_id(section_title)
+    pattern = re.compile(
+        rf"\[\[LATBUILD_SECTION_START:{re.escape(marker)}\]\]\s*"
+        rf"(.*?)"
+        rf"\[\[LATBUILD_SECTION_END:{re.escape(marker)}\]\]",
+        re.DOTALL | re.IGNORECASE,
+    )
+    match = pattern.search(full_text or "")
+    if not match:
+        return None
+
+    body = match.group(1).strip()
+
+    # Remove the heading itself; the heading is not editable body text.
+    heading = section_title.strip()
+    if body.lower().startswith(heading.lower()):
+        body = body[len(heading):].lstrip()
+
+    return body.strip() or ""

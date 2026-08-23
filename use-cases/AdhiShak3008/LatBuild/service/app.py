@@ -1,3 +1,6 @@
+
+
+
 """
 app.py
 LatBuild — SuperDocs PDF Companion
@@ -28,6 +31,7 @@ import io
 import os
 import uuid
 import json
+import re
 import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -146,9 +150,15 @@ def review_page():
     state = _get_state()
     if not state["jobs"]:
         return redirect(url_for("edit_page"))
+    # Order jobs according to selected_sections list order
+    ordered_jobs = {
+        name: state["jobs"].get(name, {})
+        for name in state.get("selected_sections", [])
+        if name in state["jobs"]
+    }
     return render_template(
         "review.html",
-        jobs=state["jobs"],
+        jobs=ordered_jobs,
         selected_sections=state["selected_sections"],
     )
 
@@ -282,6 +292,177 @@ def _build_paper_context(fm) -> str:
     return "\n\n".join(parts)
 
 
+
+# ---------------------------------------------------------------------------
+# SuperDocs change safety + PDF-aware mapping
+# ---------------------------------------------------------------------------
+
+def _plain_change_text(value: str) -> str:
+    """Convert SuperDocs HTML/text to normalized plain text."""
+    import html as _html
+    text = _html.unescape(value or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _change_old_text(change: dict) -> str:
+    for key in ("old_html", "old_text", "original_text", "before", "text"):
+        value = change.get(key)
+        if isinstance(value, str) and value.strip():
+            return _plain_change_text(value)
+    return ""
+
+
+def _change_new_text(change: dict) -> str:
+    for key in ("new_html", "new_text", "after"):
+        value = change.get(key)
+        if isinstance(value, str):
+            return _plain_change_text(value)
+    return ""
+
+
+def _token_spans(text: str):
+    """
+    Tokenize while treating PDF line-break hyphenation as one word.
+
+    Example:
+        Intel- ligence -> intelligence
+        Experi- mental -> experimental
+    """
+    tokens = []
+    for m in re.finditer(r"[A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*-?", text or ""):
+        raw = m.group(0)
+        norm = raw.lower().replace("’", "'").replace("–", "-")
+
+        if norm.endswith("-"):
+            next_m = re.match(
+                r"\s+([A-Za-z0-9]+(?:['’-][A-Za-z0-9]+)*)",
+                text[m.end():],
+            )
+            if next_m:
+                next_raw = next_m.group(1)
+                next_start = m.end() + next_m.start(1)
+                merged = (
+                    norm[:-1]
+                    + next_raw.lower().replace("’", "'").replace("–", "-")
+                )
+                tokens.append({
+                    "norm": merged,
+                    "start": m.start(),
+                    "end": next_start + len(next_raw),
+                })
+                continue
+
+        tokens.append({
+            "norm": norm.rstrip("-"),
+            "start": m.start(),
+            "end": m.end(),
+        })
+    return tokens
+
+
+def _normalized_words(text: str):
+    return [t["norm"] for t in _token_spans(text)]
+
+
+def _contains_ordered_overlap(source: str, target: str) -> bool:
+    """Prove that a SuperDocs old-value belongs to this selected section."""
+    source_words = _normalized_words(source)
+    target_words = _normalized_words(target)
+
+    if len(source_words) < 4 or len(target_words) < 4:
+        return False
+
+    max_run = min(12, len(source_words))
+    for run in range(max_run, 3, -1):
+        for i in range(len(source_words) - run + 1):
+            phrase = source_words[i:i + run]
+            for j in range(len(target_words) - run + 1):
+                if target_words[j:j + run] == phrase:
+                    return True
+    return False
+
+
+def _bouncer_filter_changes(changes: list, original_text: str = "") -> list:
+    """
+    Keep changes whose OLD content can be proven to occur in the
+    selected section. Since each section is transformed in its own dedicated
+    SuperDocs session, all proposed changes to that isolated document belong to it.
+    """
+    accepted = []
+    target = original_text or ""
+
+    for change in changes or []:
+        if not isinstance(change, dict):
+            continue
+        old_text = _change_old_text(change)
+        if not old_text:
+            accepted.append(change)
+        elif _contains_ordered_overlap(old_text, target):
+            accepted.append(change)
+        else:
+            # Token overlap fallback
+            old_words = _normalized_words(old_text)
+            target_words = set(_normalized_words(target))
+            if old_words and any(w in target_words for w in old_words if len(w) > 3):
+                accepted.append(change)
+            elif not target:
+                accepted.append(change)
+
+    # If strict filter yielded nothing but changes exist for this isolated section doc, keep them
+    if not accepted and changes:
+        accepted = [c for c in changes if isinstance(c, dict)]
+
+    return accepted
+
+
+def _find_old_text_span(original: str, old_text: str):
+    """Find SuperDocs old text inside PDF-derived text with hyphenation tolerance."""
+    source_tokens = _token_spans(original)
+    old_tokens = _normalized_words(old_text)
+
+    if not source_tokens or not old_tokens:
+        return None
+
+    n = len(old_tokens)
+    for i in range(len(source_tokens) - n + 1):
+        candidate = [t["norm"] for t in source_tokens[i:i + n]]
+        if candidate == old_tokens:
+            return (
+                source_tokens[i]["start"],
+                source_tokens[i + n - 1]["end"],
+            )
+    return None
+
+
+def _apply_structured_changes_to_section(original_text: str, changes: list):
+    """
+    Apply only approved SuperDocs edits to the original section.
+
+    The original PDF text remains the source of truth. We replace only the
+    exact source spans corresponding to approved SuperDocs old_html values.
+    """
+    result = original_text or ""
+
+    normalized = []
+    for change in changes or []:
+        old_text = _change_old_text(change)
+        new_text = _change_new_text(change)
+        if old_text and new_text is not None:
+            normalized.append((old_text, new_text))
+
+    normalized.sort(key=lambda item: len(item[0]), reverse=True)
+
+    for old_text, new_text in normalized:
+        span = _find_old_text_span(result, old_text)
+        if span is None:
+            return None
+        start, end = span
+        result = result[:start] + new_text + result[end:]
+
+    return result.strip()
+
 @app.route("/api/transform", methods=["POST"])
 def api_transform():
     """
@@ -343,8 +524,10 @@ def api_transform():
                 "job_id": job_id,
                 "status": "in_progress",
                 "original_text": extracted.clean_text,
+                "target_section_title": section.title,
                 "proposed_text": None,
                 "pending_changes": [],
+                "approved_changes": [],
                 "approved": False,
                 "error": None,
             }
@@ -372,7 +555,9 @@ def api_transform():
                     "session_id": None, "job_id": None,
                     "status": "failed",
                     "original_text": sec.full_text,
+                    "target_section_title": sec.title,
                     "proposed_text": None, "pending_changes": [],
+                    "approved_changes": [],
                     "approved": False, "error": str(e),
                 }
             state["jobs"][name] = job
@@ -418,27 +603,74 @@ def api_poll(job_id):
     job["status"] = status
 
     if status == "awaiting_approval":
-        job["pending_changes"] = job_state["pending_changes"]
+        all_changes = job_state.get("pending_changes") or []
+        filtered = _bouncer_filter_changes(
+            all_changes, job.get("original_text", "")
+        )
+
+        if not filtered:
+            job["error"] = (
+                f"SuperDocs proposed no change that can be proven to belong "
+                f"to '{section_name}'."
+            )
+
+        job["pending_changes"] = filtered
         return jsonify({
             "status": "awaiting_approval",
             "section": section_name,
-            "pending_changes": job_state["pending_changes"],
+            "pending_changes": filtered,
+            "error": job.get("error"),
         })
 
     if status == "completed":
-        result = job_state.get("result") or {}
-        final_html = sd.get_final_html(result) or ""
+        approved_changes = job.get("approved_changes") or []
 
-        # Extract the rewritten text from the result
-        if final_html:
-            proposed_text = extract_text_from_html(final_html)
-        else:
-            # Fall back to export
-            try:
-                docx_bytes = sd.export_document(job["session_id"])
-                proposed_text = extract_text_from_docx(docx_bytes)
-            except sd.SuperDocsError:
-                proposed_text = job["original_text"]
+        proposed_text = None
+        if approved_changes:
+            proposed_text = _apply_structured_changes_to_section(
+                job.get("original_text", ""), approved_changes
+            )
+
+        # Robust fallback: extract clean text directly from SuperDocs transformed HTML
+        if not proposed_text:
+            res = job_state.get("result") or {}
+            raw_html = ""
+            if isinstance(res, dict):
+                raw_html = (
+                    res.get("html")
+                    or res.get("document_html")
+                    or res.get("final_html")
+                    or res.get("content")
+                    or ""
+                )
+            elif isinstance(res, str):
+                raw_html = res
+
+            if not raw_html:
+                raw_html = (
+                    job_state.get("final_html")
+                    or job_state.get("html")
+                    or job_state.get("document_html")
+                    or ""
+                )
+
+            if raw_html:
+                from docx_bridge import extract_text_from_html
+                extracted_text = extract_text_from_html(raw_html)
+                if extracted_text and extracted_text.strip():
+                    proposed_text = extracted_text.strip()
+
+        if proposed_text is None:
+            job["status"] = "failed"
+            job["error"] = (
+                f"Approved SuperDocs changes could not be mapped back to "
+                f"'{section_name}'."
+            )
+            return jsonify({
+                "status": "failed",
+                "section": section_name,
+                "error": job["error"],
+            }), 422
 
         job["proposed_text"] = proposed_text
         return jsonify({
@@ -473,10 +705,34 @@ def api_approve():
     if not job_id or not session_id:
         return jsonify({"error": "job_id and session_id are required."}), 400
 
+    state = _get_state()
+    job = next(
+        (j for j in state["jobs"].values() if j.get("job_id") == job_id),
+        None,
+    )
+    if job is None:
+        return jsonify({"error": "Job not found."}), 404
+
+    pending = job.get("pending_changes") or []
+    decision_map = {
+        d.get("change_id"): bool(d.get("approved"))
+        for d in decisions
+        if d.get("change_id")
+    }
+
+    approved_changes = [
+        change for change in pending
+        if decision_map.get(change.get("change_id"), True) is True
+    ]
+
     try:
         sd.approve_changes(session_id, job_id, decisions)
     except sd.SuperDocsError as e:
         return jsonify({"error": str(e)}), 502
+
+    # Persist BEFORE SuperDocs transitions to completed.
+    job["approved_changes"] = approved_changes or pending
+    job["approved"] = True
 
     return jsonify({"ok": True})
 
@@ -522,7 +778,7 @@ def api_apply():
 
         if not replacement:
             continue
-            continue
+            
         section = fm.get_section(section_name)
         if section:
             edits.append((section, replacement))
@@ -568,6 +824,50 @@ def api_apply():
         )
     except Exception as e:
         return jsonify({"error": f"PDF patching failed: {str(e)}"}), 500
+
+    # -----------------------------------------------------------------------
+    # Safety gate: never send a missing/empty PDF to the fidelity checker.
+    # The patcher may reject an edit and remove the temporary output file.
+    # -----------------------------------------------------------------------
+    if not patch_report.success:
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except OSError:
+            pass
+
+        state["output_path"] = None
+
+        import logging
+        patch_warnings = [
+            w.description for w in patch_report.warnings
+        ]
+
+        logging.error(
+            "PATCH REJECTED: success=%s pages_modified=%s warnings=%s output=%s",
+            patch_report.success,
+            patch_report.pages_modified,
+            patch_warnings,
+            patch_report.output_path,
+        )
+
+        return jsonify({
+            "error": "PDF patching rejected the edit; the original PDF was not modified.",
+            "patch_warnings": patch_warnings,
+        }), 422
+
+    if not os.path.exists(output_path) or os.path.getsize(output_path) == 0:
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except OSError:
+            pass
+
+        state["output_path"] = None
+
+        return jsonify({
+            "error": "PDF patching produced no valid output; the original PDF was not modified.",
+        }), 500
 
     state["output_path"] = output_path
 

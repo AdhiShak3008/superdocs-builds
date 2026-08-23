@@ -28,6 +28,10 @@ Reflow strategy:
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 import math
+import re
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import fitz  # pymupdf
@@ -49,6 +53,8 @@ class SectionPatch:
     region: FlowRegion
     text_segment: str          # the text that goes into this region
     operation: str             # "replace" | "overflow_extend" | "shrink_empty"
+    fontsize: float = 0.0
+    fontname: str = ""
 
 
 @dataclass
@@ -197,9 +203,25 @@ class ReflowEngine:
         flow_map: DocumentFlowMap,
     ) -> ReflowResult:
         grammar = flow_map.grammar
-        fontname = grammar.body_fontname
-        fontsize = grammar.body_fontsize
-        line_height = grammar.body_line_height
+        sec_fontsize = (
+            float(section.content_blocks[0].fontsize)
+            if section.content_blocks and section.content_blocks[0].fontsize > 0
+            else float(grammar.body_fontsize)
+        )
+        sec_fontname = (
+            _normalise_fontname(section.content_blocks[0].fontname)
+            if section.content_blocks and section.content_blocks[0].fontname
+            else _normalise_fontname(grammar.body_fontname)
+        )
+        sec_line_height = (
+            float(section.content_blocks[0].line_height)
+            if section.content_blocks and section.content_blocks[0].line_height > 0
+            else float(grammar.body_line_height)
+        )
+
+        fontname = sec_fontname
+        fontsize = sec_fontsize
+        line_height = sec_line_height
 
         # ------------------------------------------------------------------
         # Step 1: Measure the replacement text
@@ -230,7 +252,12 @@ class ReflowEngine:
         # Step 3: Distribute replacement text across existing flow regions
         # ------------------------------------------------------------------
         patches, remaining_text = self._distribute_text(
-            replacement_text, section.flow_regions, grammar
+            replacement_text,
+            section.flow_regions,
+            grammar,
+            fontsize=sec_fontsize,
+            fontname=sec_fontname,
+            line_height=sec_line_height,
         )
 
         overflow_warnings = []
@@ -271,7 +298,8 @@ class ReflowEngine:
         # minor gaps or slight overflow. The reflow engine architecture supports
         # this feature but it needs per-layout calibration.
         # ------------------------------------------------------------------
-        # downstream_shifts = self._plan_downstream_shifts(...)  # deferred
+        # Immutable-layout mode: downstream_shifts intentionally remain empty.
+        downstream_shifts = []
 
         # Collect affected pages
         affected_pages = sorted(set(
@@ -284,6 +312,63 @@ class ReflowEngine:
                                or 2))
         # simpler: just collect from all_blocks
         max_page = max((b.page for b in flow_map.all_blocks), default=1)
+        # ------------------------------------------------------------------
+        # Step 7: Preflight verification
+        # ------------------------------------------------------------------
+        if can_apply and patches:
+            preflight_fontname = sec_fontname
+            preflight_fontsize = sec_fontsize
+            preflight_lh = min(1.15, max(1.08, sec_line_height / sec_fontsize)) if sec_fontsize > 0 else 1.15
+            
+            for p_idx, patch in enumerate(patches):
+                if patch.operation == "shrink_empty" or not patch.text_segment.strip():
+                    continue
+                r = patch.region
+                x0 = float(min(r.bbox.x0, r.bbox.x1))
+                x1 = float(max(r.bbox.x0, r.bbox.x1))
+                y0 = float(min(r.bbox.y0, r.bbox.y1))
+                y1 = float(max(r.bbox.y0, r.bbox.y1))
+                if r.heading_bottom_y > y0:
+                    y0 = float(r.heading_bottom_y)
+                w = max(0.0, x1 - x0)
+                h = max(0.0, y1 - y0)
+                
+                if w > 0 and h > 0:
+                    tmp_doc = fitz.open()
+                    try:
+                        p_page = tmp_doc.new_page(width=w, height=h)
+                        p_rect = fitz.Rect(0, 0, w, h)
+                        p_text = re.sub(r'\n{2,}', '\n', patch.text_segment.strip())
+                        p_fontname = _normalise_fontname(patch.fontname or preflight_fontname)
+                        p_res = p_page.insert_textbox(
+                            p_rect,
+                            p_text,
+                            fontname=p_fontname,
+                            fontsize=patch.fontsize if patch.fontsize > 0 else preflight_fontsize,
+                            lineheight=preflight_lh,
+                            align=fitz.TEXT_ALIGN_JUSTIFY,
+                            color=(0, 0, 0),
+                        )
+                        if not math.isfinite(p_res) or p_res < 0:
+                            can_apply = False
+                            overflow_warnings.append(OverflowWarning(
+                                section_name=section.title,
+                                lines_needed=0,
+                                lines_available=0,
+                                overflow_lines=1,
+                                collides_with_non_content=False,
+                                description=(
+                                    f"Replacement text for '{section.title}' exceeds its existing "
+                                    f"physical text regions. Immutable-layout mode rejects the edit; "
+                                    f"no neighbouring content, column geometry, or page layout will be changed."
+                                ),
+                            ))
+                            break
+                    except Exception:
+                        pass
+                    finally:
+                        tmp_doc.close()
+
         all_page_nums = list(range(1, max_page + 1))
         unaffected_pages = [p for p in all_page_nums if p not in affected_pages]
 
@@ -307,30 +392,63 @@ class ReflowEngine:
         text: str,
         regions: List[FlowRegion],
         grammar: DocumentGrammar,
+        fontsize: float = 0.0,
+        fontname: str = "",
+        line_height: float = 0.0,
     ) -> Tuple[List[SectionPatch], str]:
         """
         Fill each region with as much text as fits.
+        Preserves paragraph structure across region boundaries.
         Returns (patches, remaining_text).
         """
-        patches = []
-        remaining = text
+        import logging
+        logger = logging.getLogger(__name__)
 
-        for region in regions:
-            if not remaining.strip():
+        patches = []
+        remaining = text.strip()
+
+        eff_fontsize = float(fontsize) if fontsize > 0 else float(grammar.body_fontsize)
+        eff_fontname = _normalise_fontname(fontname or grammar.body_fontname)
+        eff_line_height = float(line_height) if line_height > 0 else float(grammar.body_line_height)
+
+        logger.debug("[REFLOW] Distributing text across %d regions", len(regions))
+
+        for idx, region in enumerate(regions):
+            if not remaining:
                 # Region is now empty — mark it as cleared
                 patches.append(SectionPatch(
                     region=region,
                     text_segment="",
                     operation="shrink_empty",
+                    fontsize=eff_fontsize,
+                    fontname=eff_fontname,
                 ))
+                logger.debug(
+                    "[REFLOW] region=%d page=%d col=%d shrink_empty (unused)",
+                    idx, region.page, region.column
+                )
                 continue
 
-            segment, remaining = self._fill_region(remaining, region, grammar)
+            segment, remaining = self._fill_region(
+                remaining,
+                region,
+                grammar,
+                fontsize=eff_fontsize,
+                fontname=eff_fontname,
+                line_height=eff_line_height,
+            )
             patches.append(SectionPatch(
                 region=region,
                 text_segment=segment,
                 operation="replace",
+                fontsize=eff_fontsize,
+                fontname=eff_fontname,
             ))
+            logger.debug(
+                "[REFLOW] region=%d page=%d col=%d placed_words=%d remaining_words=%d",
+                idx, region.page, region.column,
+                len(segment.split()), len(remaining.split()) if remaining else 0
+            )
 
         return patches, remaining
 
@@ -339,57 +457,119 @@ class ReflowEngine:
         text: str,
         region: FlowRegion,
         grammar: DocumentGrammar,
+        fontsize: float = 0.0,
+        fontname: str = "",
+        line_height: float = 0.0,
     ) -> Tuple[str, str]:
         """
-        Fill a region with as much text as fits.
-        Returns (text_for_region, remaining_text).
-        """
-        available_height = region.bbox.height
-        line_height = grammar.body_line_height
-        max_lines = max(1, int(available_height / line_height))
-        col_width = region.column_width
+        Fill a region using the exact writable geometry and typography used by pdf_patcher.
 
-        fontname = grammar.body_fontname
-        fontsize = grammar.body_fontsize
+        The patcher preserves the heading and inserts body text only below
+        heading_bottom_y. The planner measures against that same reduced rectangle
+        and uses the document grammar's derived line height ratio.
+        """
+        if not text.strip():
+            return "", ""
+
+        eff_fontname = _normalise_fontname(fontname or grammar.body_fontname)
+        eff_fontsize = float(fontsize) if fontsize > 0 else float(grammar.body_fontsize)
+        eff_lh = float(line_height) if line_height > 0 else float(grammar.body_line_height)
+        lh_ratio = min(1.15, max(1.08, eff_lh / eff_fontsize)) if eff_fontsize > 0 else 1.15
+
+        x0 = float(min(region.bbox.x0, region.bbox.x1))
+        x1 = float(max(region.bbox.x0, region.bbox.x1))
+        y0 = float(min(region.bbox.y0, region.bbox.y1))
+        y1 = float(max(region.bbox.y0, region.bbox.y1))
+
+        if region.heading_bottom_y > y0:
+            y0 = float(region.heading_bottom_y)
+
+        width = x1 - x0
+        height = y1 - y0
+
+        if (
+            not all(math.isfinite(v) for v in (x0, y0, x1, y1))
+            or width <= 0.5
+            or height <= 0.5
+        ):
+            return "", text.strip()
+
+        rect = fitz.Rect(0, 0, width, height)
 
         paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-        filled_paragraphs = []
-        lines_used = 0
+        if not paragraphs:
+            return "", ""
 
-        for para_idx, para in enumerate(paragraphs):
-            words = para.split()
-            para_lines = []
-            current_line_words = []
-            current_width = 0.0
-            space_w = measure_text_width(" ", fontname, fontsize)
+        def fits(candidate: str) -> bool:
+            if not candidate.strip():
+                return False
 
-            for word in words:
-                word_w = measure_text_width(word, fontname, fontsize)
-                if not current_line_words:
-                    current_line_words.append(word)
-                    current_width = word_w
-                elif current_width + space_w + word_w <= col_width:
-                    current_line_words.append(word)
-                    current_width += space_w + word_w
+            tmp_doc = fitz.open()
+            try:
+                page = tmp_doc.new_page(width=width, height=height)
+                # Clean multiple newlines so paragraph breaks don't insert double-height empty lines
+                text_to_insert = re.sub(r'\n{2,}', '\n', candidate.strip())
+                result = page.insert_textbox(
+                    rect,
+                    text_to_insert,
+                    fontname=eff_fontname,
+                    fontsize=eff_fontsize,
+                    lineheight=lh_ratio,
+                    align=fitz.TEXT_ALIGN_JUSTIFY,
+                    color=(0, 0, 0),
+                )
+                return math.isfinite(result) and result >= 0
+            except Exception:
+                return False
+            finally:
+                tmp_doc.close()
+
+        # If the entire text fits, place it all
+        if fits(text.strip()):
+            return text.strip(), ""
+
+        # Place full paragraphs that fit, then binary search words of the partial paragraph
+        placed_paras: List[str] = []
+
+        for p_idx, para in enumerate(paragraphs):
+            candidate_paras = placed_paras + [para]
+            candidate_str = "\n\n".join(candidate_paras)
+            if fits(candidate_str):
+                placed_paras.append(para)
+            else:
+                words = para.split()
+                low = 1
+                high = len(words)
+                best_w = 0
+
+                while low <= high:
+                    mid = (low + high) // 2
+                    sub_para = " ".join(words[:mid])
+                    candidate_str = (
+                        "\n\n".join(placed_paras + [sub_para])
+                        if placed_paras
+                        else sub_para
+                    )
+                    if fits(candidate_str):
+                        best_w = mid
+                        low = mid + 1
+                    else:
+                        high = mid - 1
+
+                if best_w > 0:
+                    placed_paras.append(" ".join(words[:best_w]))
+                    rem_in_this_para = " ".join(words[best_w:])
+                    remaining_paras = [rem_in_this_para] + paragraphs[p_idx + 1:]
+                    return "\n\n".join(placed_paras), "\n\n".join(remaining_paras)
                 else:
-                    para_lines.append(" ".join(current_line_words))
-                    current_line_words = [word]
-                    current_width = word_w
+                    if placed_paras:
+                        remaining_paras = paragraphs[p_idx:]
+                        return "\n\n".join(placed_paras), "\n\n".join(remaining_paras)
+                    else:
+                        return "", text.strip()
 
-            if current_line_words:
-                para_lines.append(" ".join(current_line_words))
+        return "\n\n".join(placed_paras), ""
 
-            para_line_count = len(para_lines) + 1  # +1 for paragraph spacing
-            if lines_used + para_line_count > max_lines and filled_paragraphs:
-                # This paragraph doesn't fit — stop here
-                remaining_paras = paragraphs[para_idx:]
-                return "\n\n".join(filled_paragraphs), "\n\n".join(remaining_paras)
-
-            filled_paragraphs.append(para)
-            lines_used += para_line_count
-
-        # All text fits
-        return "\n\n".join(filled_paragraphs), ""
 
     # ------------------------------------------------------------------
     # Overflow handling
@@ -404,104 +584,43 @@ class ReflowEngine:
         delta_points: float,
     ) -> dict:
         """
-        Handle text that overflowed the original section regions.
-        Returns dict with patches, shifts, warnings, unresolvable flag.
+        Immutable-layout policy.
+
+        There is deliberately no overflow extension and no downstream
+        movement. SuperDocs may edit text only inside the section's existing
+        physical regions. If text remains after those regions are filled,
+        the edit is rejected.
         """
-        patches = []
-        shifts = []
-        warnings = []
-        unresolvable = False
+        if not remaining_text.strip():
+            return {
+                "patches": [],
+                "shifts": [],
+                "warnings": [],
+                "unresolvable": False,
+            }
 
-        # Find downstream sections to push
-        downstream = flow_map.sections_after(section)
+        overflow_lines = max(1, len(remaining_text.split()))
+        warning = OverflowWarning(
+            section_name=section.title,
+            lines_needed=0,
+            lines_available=0,
+            overflow_lines=overflow_lines,
+            collides_with_non_content=False,
+            description=(
+                f"Replacement text for '{section.title}' exceeds its existing "
+                "physical text regions. Immutable-layout mode rejects the edit; "
+                "no neighbouring content, column geometry, or page layout will "
+                "be changed."
+            ),
+        )
 
-        if not downstream:
-            # Nothing downstream — overflow has nowhere to go
-            warnings.append(OverflowWarning(
-                section_name=section.name,
-                lines_needed=0,
-                lines_available=0,
-                overflow_lines=len(remaining_text.split("\n")),
-                collides_with_non_content=False,
-                description=(
-                    f"Replacement text overflows the available space for "
-                    f"'{section.name}' and there are no downstream sections "
-                    f"to shift. The overflow cannot be applied without "
-                    f"truncating content."
-                ),
-            ))
-            unresolvable = True
-            return {"patches": patches, "shifts": shifts,
-                    "warnings": warnings, "unresolvable": unresolvable}
+        return {
+            "patches": [],
+            "shifts": [],
+            "warnings": [warning],
+            "unresolvable": True,
+        }
 
-        # Check for non-content collision in the overflow zone
-        last_region = section.flow_regions[-1] if section.flow_regions else None
-        collision = False
-        if last_region:
-            overflow_bbox = BBox(
-                x0=last_region.bbox.x0,
-                y0=last_region.bbox.y1,
-                x1=last_region.bbox.x1,
-                y1=last_region.bbox.y1 + abs(delta_points),
-            )
-            for nc in flow_map.non_content:
-                if nc.page == last_region.page:
-                    # Use normalised overlap check
-                    bx0 = min(overflow_bbox.x0, overflow_bbox.x1)
-                    bx1 = max(overflow_bbox.x0, overflow_bbox.x1)
-                    by0 = min(overflow_bbox.y0, overflow_bbox.y1)
-                    by1 = max(overflow_bbox.y0, overflow_bbox.y1)
-                    ex0 = min(nc.bbox.x0, nc.bbox.x1)
-                    ex1 = max(nc.bbox.x0, nc.bbox.x1)
-                    ey0 = min(nc.bbox.y0, nc.bbox.y1)
-                    ey1 = max(nc.bbox.y0, nc.bbox.y1)
-                    ox = max(0, min(bx1, ex1) - max(bx0, ex0))
-                    oy = max(0, min(by1, ey1) - max(by0, ey0))
-                    if ox > 0 and oy > 0:
-                        collision = True
-                        break
-
-        if collision:
-            warnings.append(OverflowWarning(
-                section_name=section.name,
-                lines_needed=0,
-                lines_available=0,
-                overflow_lines=len(remaining_text.split("\n")),
-                collides_with_non_content=True,
-                description=(
-                    f"Replacement text for '{section.name}' would overflow "
-                    f"into a figure, table, or image. Applying this edit "
-                    f"would corrupt the layout. Please use a shorter rewrite."
-                ),
-            ))
-            unresolvable = True
-            return {"patches": patches, "shifts": shifts,
-                    "warnings": warnings, "unresolvable": unresolvable}
-
-        # Create an overflow extension region immediately after the last region
-        if last_region:
-            overflow_region = FlowRegion(
-                page=last_region.page,
-                column=last_region.column,
-                bbox=BBox(
-                    x0=last_region.bbox.x0,
-                    y0=last_region.bbox.y1,
-                    x1=last_region.bbox.x1,
-                    y1=last_region.bbox.y1 + delta_points + grammar.body_line_height * 2,
-                ),
-                column_width=last_region.column_width,
-            )
-            patches.append(SectionPatch(
-                region=overflow_region,
-                text_segment=remaining_text,
-                operation="overflow_extend",
-            ))
-
-        # Plan downstream shifts
-        shifts = self._plan_downstream_shifts(section, delta_points, flow_map)
-
-        return {"patches": patches, "shifts": shifts,
-                "warnings": warnings, "unresolvable": unresolvable}
 
     # ------------------------------------------------------------------
     # Downstream shift planning

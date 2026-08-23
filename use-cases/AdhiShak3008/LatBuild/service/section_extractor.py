@@ -33,14 +33,7 @@ def extract_section(section: Section, grammar: DocumentGrammar) -> ExtractedSect
     Extract clean prose from a section.
     Returns the text SuperDocs will receive.
     """
-    # Join paragraph blocks with double newline to preserve paragraph structure
-    paragraphs = []
-    for block in section.content_blocks:
-        text = block.text.strip()
-        if text:
-            paragraphs.append(text)
-
-    clean_text = "\n\n".join(paragraphs)
+    clean_text = section.full_text.strip()
 
     word_count = len(clean_text.split()) if clean_text else 0
     char_count = len(clean_text)

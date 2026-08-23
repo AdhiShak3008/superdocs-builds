@@ -22,35 +22,35 @@
 
     <!-- Per-section review panels -->
     {% for section_name, job in jobs.items() %}
-    <section class="card section-review-card" id="card-{{ loop.index }}" data-section="{{ section_name }}" data-job-id="{{ job.job_id }}" data-session-id="{{ job.session_id }}">
+    <section class="card section-review-card" data-section="{{ section_name }}" data-job-id="{{ job.job_id }}" data-session-id="{{ job.session_id }}">
       <div class="section-review-header">
         <h2>{{ section_name }}</h2>
-        <div class="section-status-badge" id="status-{{ loop.index }}">
+        <div class="section-status-badge">
           <span class="spinner"></span> Processing…
         </div>
       </div>
 
-      <div class="diff-grid hidden" id="diff-{{ loop.index }}">
+      <div class="diff-grid hidden">
         <div class="diff-panel diff-before">
           <div class="diff-label">Original</div>
-          <div class="diff-content" id="original-{{ loop.index }}">{{ job.original_text }}</div>
+          <div class="diff-content original-content">{{ job.original_text }}</div>
         </div>
         <div class="diff-panel diff-after">
           <div class="diff-label">Proposed</div>
-          <div class="diff-content" id="proposed-{{ loop.index }}"></div>
+          <div class="diff-content proposed-content"></div>
         </div>
       </div>
 
-      <div class="section-actions hidden" id="actions-{{ loop.index }}">
-        <button class="btn btn-success approve-section-btn" data-idx="{{ loop.index }}">
+      <div class="section-actions hidden">
+        <button type="button" class="btn btn-success approve-section-btn">
           ✓ Approve this section
         </button>
-        <button class="btn btn-danger reject-section-btn" data-idx="{{ loop.index }}">
+        <button type="button" class="btn btn-danger reject-section-btn">
           ✗ Reject — keep original
         </button>
       </div>
 
-      <div class="section-decision hidden" id="decision-{{ loop.index }}"></div>
+      <div class="section-decision hidden"></div>
 
       {% if job.status == 'failed' %}
       <div class="alert alert-error">SuperDocs job failed: {{ job.error }}</div>

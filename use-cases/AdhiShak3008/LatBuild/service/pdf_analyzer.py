@@ -473,10 +473,69 @@ class PDFAnalyzer:
                 split_x = 0.0
                 cols = grammar.column_regions
 
-        # Split words by column, maintaining strict separation
-        col_word_lists = self._split_words_by_column(words, split_x, pw, page_height)
-
+        # On Page 1 with multi-column layout, detect top title/author header banner
         blocks: List[TextBlock] = []
+        col_words_to_split = words
+
+        if page_num == 1 and grammar.column_count == 2 and split_x > 0:
+            body_size = grammar.body_fontsize
+            col0_body = [
+                w for w in words
+                if (w["x0"] + w["x1"]) / 2 < split_x
+                and (
+                    float(w.get("size", body_size)) <= body_size * 1.05
+                    or any(h in w["text"].lower() for h in ["abstract", "intro", "keywords"])
+                )
+            ]
+            col1_body = [
+                w for w in words
+                if (w["x0"] + w["x1"]) / 2 >= split_x
+                and float(w.get("size", body_size)) <= body_size * 1.05
+            ]
+
+            min_col0_y = min((w["top"] for w in col0_body), default=9999.0)
+            min_col1_y = min((w["top"] for w in col1_body), default=9999.0)
+            banner_threshold = min(min_col0_y, min_col1_y)
+
+            if banner_threshold < 9999.0 and banner_threshold > 0:
+                banner_words = [w for w in words if w["bottom"] <= banner_threshold + 1.0]
+                col_words_to_split = [w for w in words if w["bottom"] > banner_threshold + 1.0]
+
+                if banner_words:
+                    banner_lines = self._group_words_into_lines(banner_words)
+                    banner_paras = self._group_lines_into_paragraphs(banner_lines)
+                    for para in banner_paras:
+                        all_words = [w for line in para for w in line]
+                        text = " ".join(w["text"] for w in all_words).strip()
+                        if not text:
+                            continue
+                        x0 = min(w["x0"] for w in all_words)
+                        y0 = min(w["top"] for w in all_words)
+                        x1 = max(w["x1"] for w in all_words)
+                        y1 = max(w["bottom"] for w in all_words)
+                        bbox = BBox(x0, y0, x1, y1)
+                        if self._overlaps_non_content(bbox, page_num, non_content):
+                            continue
+                        fnames = [w.get("fontname", "") for w in all_words]
+                        sizes = [float(w.get("size", grammar.body_fontsize)) for w in all_words]
+                        fontname = max(set(fnames), key=fnames.count)
+                        fontsize = round(sum(sizes) / len(sizes), 1)
+                        blocks.append(TextBlock(
+                            text=text,
+                            bbox=bbox,
+                            page=page_num,
+                            column=0,
+                            fontname=fontname,
+                            fontsize=fontsize,
+                            is_bold="bold" in fontname.lower() or "Bold" in fontname,
+                            is_heading=False,
+                            reading_order=ro[0],
+                            line_height=grammar.body_line_height,
+                        ))
+                        ro[0] += 1
+
+        # Split words by column, maintaining strict separation
+        col_word_lists = self._split_words_by_column(col_words_to_split, split_x, pw, page_height)
         for col_idx, col_words in enumerate(col_word_lists):
             if not col_words:
                 continue
@@ -565,12 +624,22 @@ class PDFAnalyzer:
 
         for block in blocks:
             parts = self._split_block_on_headings(block, grammar)
-            for part_text, part_is_heading in parts:
-                # Re-use block geometry for all parts (approximate — bbox shrinks
-                # but we keep the original for provenance)
+            for p_idx, (part_text, part_is_heading) in enumerate(parts):
+                if len(parts) > 1 and part_is_heading:
+                    # Heading part in a multi-part split is just the top line
+                    lh = float(block.line_height or grammar.body_line_height or 12.0)
+                    part_bbox = BBox(
+                        block.bbox.x0,
+                        block.bbox.y0,
+                        block.bbox.x1,
+                        min(block.bbox.y0 + lh * 1.5, block.bbox.y1),
+                    )
+                else:
+                    part_bbox = block.bbox
+
                 b = TextBlock(
                     text=part_text,
-                    bbox=block.bbox,
+                    bbox=part_bbox,
                     page=block.page,
                     column=block.column,
                     fontname=block.fontname,

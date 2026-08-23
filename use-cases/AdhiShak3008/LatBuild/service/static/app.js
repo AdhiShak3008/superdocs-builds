@@ -190,19 +190,28 @@ function initEditPage() {
 const _sectionDecisions = {};  // section_name -> { approved: bool, text: str }
 let _allJobsComplete = false;
 
+function getSectionCard(sectionName) {
+  const cards = document.querySelectorAll('.section-review-card');
+  for (const card of cards) {
+    if (card.dataset.section === sectionName) {
+      return card;
+    }
+  }
+  return null;
+}
+
 function initReviewPage() {
   const state = window.REVIEW_STATE;
-  if (!state) return;
+  if (!state || !state.jobs) return;
 
-  // Poll all in-progress jobs
-  Object.entries(state.jobs).forEach(([sectionName, job], idx) => {
-    const cardIdx = idx + 1;
+  // Poll all in-progress jobs by exact section name
+  Object.entries(state.jobs).forEach(([sectionName, job]) => {
     if (job.status === 'completed' && job.proposed_text) {
-      showDiff(sectionName, cardIdx, job.proposed_text);
+      showDiff(sectionName, job.proposed_text);
     } else if (job.status === 'failed') {
-      showError(cardIdx, job.error || 'Unknown error');
+      showError(sectionName, job.error || 'Unknown error');
     } else if (job.job_id) {
-      pollJob(sectionName, job.job_id, cardIdx);
+      pollJob(sectionName, job.job_id);
     }
   });
 
@@ -216,62 +225,66 @@ function initReviewPage() {
   document.getElementById('apply-btn')?.addEventListener('click', applyChanges);
 }
 
-async function pollJob(sectionName, jobId, cardIdx) {
+async function pollJob(sectionName, jobId) {
   try {
     const resp = await fetch(`/api/poll/${jobId}`);
     const data = await resp.json();
 
     if (!resp.ok || data.error) {
-      showError(cardIdx, data.error || 'Poll failed');
+      showError(sectionName, data.error || 'Poll failed');
       return;
     }
 
     if (data.status === 'awaiting_approval') {
       // Auto-approve SuperDocs internal changes and keep polling
-      const decisions = (data.pending_changes || []).map(c => ({
+      const pendingChanges = data.pending_changes || [];
+      const decisions = pendingChanges.map(c => ({
         change_id: c.change_id || String(Math.random()),
         approved: true,
         feedback: '',
       }));
-      const job = window.REVIEW_STATE.jobs[sectionName];
-      if (decisions.length > 0 && job?.session_id) {
+      const job = window.REVIEW_STATE?.jobs?.[sectionName];
+      if (job?.session_id) {
         await fetch('/api/approve', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             job_id: jobId,
             session_id: job.session_id,
-            decisions,
+            decisions: decisions.length > 0 ? decisions : [{ change_id: 'auto', approved: true }],
           }),
         });
       }
-      setTimeout(() => pollJob(sectionName, jobId, cardIdx), 3000);
+      setTimeout(() => pollJob(sectionName, jobId), 2500);
       return;
     }
 
     if (data.status === 'completed') {
-      showDiff(sectionName, cardIdx, data.proposed_text || '');
+      showDiff(sectionName, data.proposed_text || '');
       checkAllComplete();
       return;
     }
 
     if (data.status === 'failed') {
-      showError(cardIdx, data.error || 'Job failed');
+      showError(sectionName, data.error || 'Job failed');
       return;
     }
 
     // Still in progress
-    setTimeout(() => pollJob(sectionName, jobId, cardIdx), 3000);
+    setTimeout(() => pollJob(sectionName, jobId), 2500);
   } catch (err) {
-    setTimeout(() => pollJob(sectionName, jobId, cardIdx), 5000);
+    setTimeout(() => pollJob(sectionName, jobId), 4000);
   }
 }
 
-function showDiff(sectionName, cardIdx, proposedText) {
-  const diffEl     = document.getElementById(`diff-${cardIdx}`);
-  const proposedEl = document.getElementById(`proposed-${cardIdx}`);
-  const actionsEl  = document.getElementById(`actions-${cardIdx}`);
-  const statusBadge = document.getElementById(`status-${cardIdx}`);
+function showDiff(sectionName, proposedText) {
+  const card = getSectionCard(sectionName);
+  if (!card) return;
+
+  const diffEl      = card.querySelector('.diff-grid');
+  const proposedEl  = card.querySelector('.proposed-content');
+  const actionsEl   = card.querySelector('.section-actions');
+  const statusBadge = card.querySelector('.section-status-badge');
 
   if (proposedEl) proposedEl.textContent = proposedText;
   diffEl?.classList.remove('hidden');
@@ -282,26 +295,32 @@ function showDiff(sectionName, cardIdx, proposedText) {
   }
 
   // Approve button
-  document.querySelector(`[data-idx="${cardIdx}"].approve-section-btn`)
-    ?.addEventListener('click', () => {
+  const approveBtn = card.querySelector('.approve-section-btn');
+  if (approveBtn) {
+    approveBtn.onclick = () => {
       _sectionDecisions[sectionName] = { approved: true, text: proposedText };
-      markDecision(cardIdx, true);
-    });
+      markDecision(sectionName, true);
+    };
+  }
 
   // Reject button
-  document.querySelector(`[data-idx="${cardIdx}"].reject-section-btn`)
-    ?.addEventListener('click', () => {
+  const rejectBtn = card.querySelector('.reject-section-btn');
+  if (rejectBtn) {
+    rejectBtn.onclick = () => {
       _sectionDecisions[sectionName] = { approved: false, text: null };
-      markDecision(cardIdx, false);
-    });
+      markDecision(sectionName, false);
+    };
+  }
 
   updateApplyButton();
 }
 
-function markDecision(cardIdx, approved) {
-  const decisionEl  = document.getElementById(`decision-${cardIdx}`);
-  const statusBadge = document.getElementById(`status-${cardIdx}`);
-  const actionsEl   = document.getElementById(`actions-${cardIdx}`);
+function markDecision(sectionName, approved) {
+  const card = getSectionCard(sectionName);
+  if (!card) return;
+
+  const decisionEl  = card.querySelector('.section-decision');
+  const statusBadge = card.querySelector('.section-status-badge');
 
   if (decisionEl) {
     decisionEl.textContent = approved
@@ -314,20 +333,21 @@ function markDecision(cardIdx, approved) {
     statusBadge.textContent = approved ? '✓ Approved' : '✗ Rejected';
     statusBadge.className = `section-status-badge ${approved ? 'approved' : 'rejected'}`;
   }
-  // Keep action buttons visible so the user can change their mind
-  // actionsEl stays shown — do NOT hide it
   updateApplyButton();
 }
 
-function showError(cardIdx, errorMsg) {
-  const statusBadge = document.getElementById(`status-${cardIdx}`);
+function showError(sectionName, errorMsg) {
+  const card = getSectionCard(sectionName);
+  if (!card) return;
+  const statusBadge = card.querySelector('.section-status-badge');
   if (statusBadge) {
-    statusBadge.innerHTML = `<span style="color:#b91c1c">✗ Failed</span>`;
+    statusBadge.innerHTML = `<span style="color:#b91c1c">✗ Failed: ${errorMsg}</span>`;
   }
 }
 
 function checkAllComplete() {
   const state = window.REVIEW_STATE;
+  if (!state?.jobs) return;
   const totalJobs = Object.keys(state.jobs).length;
   const decidedCount = Object.keys(_sectionDecisions).length;
   if (decidedCount >= totalJobs) {
@@ -339,7 +359,6 @@ function checkAllComplete() {
 function updateApplyButton() {
   const applyBtn = document.getElementById('apply-btn');
   const batchControls = document.getElementById('batch-controls');
-  const state = window.REVIEW_STATE;
 
   // Show batch controls once at least one job has a diff
   const hasDiff = Object.values(_sectionDecisions).length > 0 ||

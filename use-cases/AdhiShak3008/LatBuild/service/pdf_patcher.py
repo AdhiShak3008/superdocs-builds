@@ -19,6 +19,9 @@ Uses pymupdf (fitz) for all PDF modifications.
 """
 
 import io
+import os
+import re
+import math
 import logging
 from dataclasses import dataclass
 from typing import List, Optional
@@ -58,6 +61,24 @@ def apply_reflow(
     Writes the result to output_path.
     Returns a PatchReport describing what happened.
     """
+    if not reflow_result.can_apply:
+        # Never patch a PDF when reflow planning failed
+        if os.path.exists(output_path):
+            try:
+                os.unlink(output_path)
+            except OSError:
+                pass
+        return PatchReport(
+            success=False,
+            pages_modified=[],
+            warnings=[PatchWarning(
+                operation="apply_reflow",
+                description="ReflowResult.can_apply is False. Immutable-layout mode rejected the edit.",
+                skipped=True,
+            )],
+            output_path=output_path,
+        )
+
     doc = fitz.open(original_pdf_path)
     warnings = []
     pages_modified = set()
@@ -147,111 +168,81 @@ def apply_reflow(
         else:
             rect = raw_rect
 
-        fontname = _normalise_fontname(grammar.body_fontname)
-        fontsize = grammar.body_fontsize
+        fontname = _normalise_fontname(patch.fontname or grammar.body_fontname)
+        fontsize = float(patch.fontsize) if patch.fontsize > 0 else float(grammar.body_fontsize)
+        lh_ratio = (
+            min(1.15, max(1.08, float(grammar.body_line_height) / float(grammar.body_fontsize)))
+            if grammar.body_fontsize > 0
+            else 1.15
+        )
 
-        # Detect actual font size used in this region from the original PDF
-        # to match the original typography as closely as possible
-        region_text = page.get_text("dict", clip=rect)
-        detected_sizes = []
-        for block in region_text.get("blocks", []):
-            for line in block.get("lines", []):
-                for span in line.get("spans", []):
-                    sz = span.get("size", 0)
-                    if sz > 0:
-                        detected_sizes.append(sz)
-        if detected_sizes:
-            from statistics import median
-            detected_fontsize = round(median(detected_sizes), 1)
-            # Use detected size if it's reasonable (between 7 and 14pt)
-            if 7 <= detected_fontsize <= 14:
-                fontsize = detected_fontsize
-
-        # Try inserting at original font size; if overflow, retry smaller
-        overflow = -1
-        for attempt_fontsize in [fontsize, fontsize * 0.95, fontsize * 0.90,
-                                  fontsize * 0.85, fontsize * 0.80]:
-            overflow = page.insert_textbox(
-                rect,
-                patch.text_segment,
-                fontname=fontname,
-                fontsize=attempt_fontsize,
-                align=fitz.TEXT_ALIGN_JUSTIFY,
-                color=(0, 0, 0),
-            )
-            if overflow >= 0:
-                break  # fits
-
-        # If still overflowing, expand rect downward to accommodate
-        if overflow < 0:
-            # Extend bottom of rect by the overflow amount + small margin
-            expanded_rect = fitz.Rect(
-                rect.x0, rect.y0,
-                rect.x1, rect.y1 + abs(overflow) + 2
-            )
-            overflow = page.insert_textbox(
-                expanded_rect,
-                patch.text_segment,
-                fontname=fontname,
-                fontsize=fontsize,
-                align=fitz.TEXT_ALIGN_JUSTIFY,
-                color=(0, 0, 0),
-            )
+        # Immutable-layout mode uses the document grammar's body typography
+        # consistently with the reflow planner.
+        #
+        # The physical rectangle is also exactly the region computed above,
+        # including heading_bottom_y. No expansion, shrinking, or downstream
+        # reflow is permitted.
+        insert_text = re.sub(r'\n{2,}', '\n', patch.text_segment.strip())
+        overflow = page.insert_textbox(
+            rect,
+            insert_text,
+            fontname=fontname,
+            fontsize=fontsize,
+            lineheight=lh_ratio,
+            align=fitz.TEXT_ALIGN_JUSTIFY,
+            color=(0, 0, 0),
+        )
 
         if overflow < 0:
             warnings.append(PatchWarning(
                 operation=f"insert text page {patch.region.page}",
                 description=(
-                    f"Text overflow on page {patch.region.page}: "
-                    f"{abs(overflow):.0f} points of text did not fit. "
-                    f"Consider requesting a more concise rewrite."
+                    f"Replacement text on page {patch.region.page} does not fit "
+                    "the original physical region. The edit was rejected without "
+                    "changing the PDF layout."
                 ),
-                skipped=False,
+                skipped=True,
             ))
+            doc.close()
+            # Never leave the caller with a misleading zero-byte output PDF.
+            # The caller must treat success=False as a rejected edit.
+            try:
+                if os.path.exists(output_path):
+                    os.unlink(output_path)
+            except OSError:
+                pass
+            return PatchReport(
+                success=False,
+                pages_modified=sorted(pages_modified),
+                warnings=warnings,
+                output_path=output_path,
+            )
 
     # ------------------------------------------------------------------
-    # Phase 3: Redraw downstream shifted blocks
+    # Phase 3: immutable-layout guard
     # ------------------------------------------------------------------
-    for shift in reflow_result.downstream_shifts:
-        if _collides_with_non_content(shift.original_bbox, shift.original_page, non_content):
-            continue
-
-        # Ensure target page exists (may be a new page if content pushed past end)
-        while shift.new_page > len(doc):
-            doc.new_page(width=grammar.page_width, height=grammar.page_height)
-
-        target_page_idx = shift.new_page - 1
-        target_page = doc[target_page_idx]
-
-        # Build target rect
-        if shift.new_col < len(grammar.column_regions):
-            col = grammar.column_regions[shift.new_col]
-            col_x0, col_x1 = col.x0, col.x1
-        else:
-            col_x0 = grammar.margin_left
-            col_x1 = grammar.page_width - grammar.margin_right
-
-        block_height = shift.original_bbox.height
-        target_rect_pdf = BBox(
-            x0=col_x0,
-            y0=shift.new_y0,
-            x1=col_x1,
-            y1=shift.new_y0 + block_height,
+    if reflow_result.downstream_shifts:
+        warnings.append(PatchWarning(
+            operation="downstream shifts",
+            description=(
+                "The reflow plan requires moving neighbouring content. "
+                "Immutable-layout mode rejects the edit instead."
+            ),
+            skipped=True,
+        ))
+        doc.close()
+        # Do not leave an empty output file after a rejected immutable-layout edit.
+        try:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+        except OSError:
+            pass
+        return PatchReport(
+            success=False,
+            pages_modified=sorted(pages_modified),
+            warnings=warnings,
+            output_path=output_path,
         )
-        target_rect = _to_fitz_rect(target_rect_pdf, target_page.rect.height)
-
-        fontname = _normalise_fontname(shift.original_fontname)
-        fontsize = shift.original_fontsize
-
-        target_page.insert_textbox(
-            target_rect,
-            shift.original_text,
-            fontname=fontname,
-            fontsize=fontsize,
-            align=fitz.TEXT_ALIGN_JUSTIFY,
-            color=(0, 0, 0),
-        )
-        pages_modified.add(shift.new_page)
 
     # ------------------------------------------------------------------
     # Save
@@ -319,20 +310,21 @@ def apply_multiple_reflows(
 # ---------------------------------------------------------------------------
 
 def _to_fitz_rect(bbox: BBox, page_height: float) -> fitz.Rect:
-    """
-    Convert our top-origin BBox to pymupdf's top-origin Rect.
+    """Convert a BBox to a safe, finite PyMuPDF rectangle."""
+    import math
 
-    Both pdfplumber and pymupdf use top-left origin in page coordinates
-    when accessed via the standard text extraction APIs. No conversion needed.
-    The y0 value from pdfplumber's 'top' field is the distance from the
-    top of the page, which is what fitz.Rect also expects.
-    """
-    return fitz.Rect(
-        bbox.x0,
-        bbox.y0,
-        bbox.x1,
-        bbox.y1,
-    )
+    x0 = float(min(bbox.x0, bbox.x1))
+    x1 = float(max(bbox.x0, bbox.x1))
+    y0 = float(min(bbox.y0, bbox.y1))
+    y1 = float(max(bbox.y0, bbox.y1))
+
+    values = (x0, y0, x1, y1)
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError(f"Non-finite section bbox: {values}")
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"Empty section bbox: {values}")
+
+    return fitz.Rect(x0, y0, x1, y1)
 
 
 def _collides_with_non_content(
