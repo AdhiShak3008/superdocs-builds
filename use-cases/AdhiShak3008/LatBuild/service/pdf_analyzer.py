@@ -262,10 +262,17 @@ class PDFAnalyzer:
         pw = float(pdf.pages[0].width)
         ph = float(pdf.pages[0].height)
 
-        first_words = pdf.pages[0].extract_words(
+        # Prefer a clean body page (page 2) to establish column geometry without page 1 title banners
+        rep_page = pdf.pages[1] if len(pdf.pages) > 1 else pdf.pages[0]
+        rep_words = rep_page.extract_words(
             extra_attrs=["fontname", "size"], use_text_flow=False
         )
-        split_x, cols, _ = self._find_split(first_words, pw, ph)
+        split_x, cols, is_two_col = self._find_split(rep_words, pw, ph)
+        if not is_two_col and len(pdf.pages) > 1:
+            first_words = pdf.pages[0].extract_words(
+                extra_attrs=["fontname", "size"], use_text_flow=False
+            )
+            split_x, cols, _ = self._find_split(first_words, pw, ph)
 
         line_height = body_fontsize * 1.2
         all_gaps = []
@@ -357,27 +364,32 @@ class PDFAnalyzer:
         max_w = page_width * 0.35
         body = [w for w in cw if (w["x1"] - w["x0"]) <= max_w] or cw
 
-        # x-midpoint histogram (10pt buckets)
-        bucket = 10.0
+        # x-midpoint histogram (5pt buckets)
+        bucket = 5.0
+        lo, hi = page_width * 0.35, page_width * 0.65
+        start_b = int(lo / bucket) * bucket
+        end_b = int(hi / bucket) * bucket
         hist: Dict[float, int] = {}
+        curr = start_b
+        while curr <= end_b:
+            hist[round(curr, 2)] = 0
+            curr += bucket
+
         for w in body:
-            b = int(((w["x0"] + w["x1"]) / 2) / bucket) * bucket
-            hist[b] = hist.get(b, 0) + 1
+            mid = (w["x0"] + w["x1"]) / 2
+            b = round(int(mid / bucket) * bucket, 2)
+            if b in hist:
+                hist[b] += 1
 
-        # Find valley in the middle zone (30%–70% of page width)
-        lo, hi = page_width * 0.30, page_width * 0.70
-        mid_hist = {k: v for k, v in hist.items() if lo <= k <= hi}
-        if not mid_hist:
-            x0 = min(w["x0"] for w in cw)
-            x1 = max(w["x1"] for w in cw)
-            return 0.0, [ColumnRegion(0, x0, x1, x1 - x0)], False
-
-        valley_b = min(mid_hist, key=lambda k: mid_hist[k])
+        center = page_width / 2
+        min_count = min(hist.values())
+        min_buckets = [b for b, count in hist.items() if count == min_count]
+        valley_b = min(min_buckets, key=lambda b: abs(b + bucket / 2 - center))
         split_x  = valley_b + bucket / 2   # center of valley bucket
 
         # Verify balance: each side must have ≥ 20% of body words
-        n_left  = sum(v for k, v in hist.items() if k + bucket / 2 < split_x)
-        n_right = sum(v for k, v in hist.items() if k + bucket / 2 >= split_x)
+        n_left  = sum(1 for w in body if (w["x0"] + w["x1"]) / 2 < split_x)
+        n_right = sum(1 for w in body if (w["x0"] + w["x1"]) / 2 >= split_x)
         total   = max(len(body), 1)
         if n_left / total < 0.20 or n_right / total < 0.20:
             x0 = min(w["x0"] for w in cw)
@@ -388,9 +400,14 @@ class PDFAnalyzer:
         left_words  = [w for w in body if (w["x0"]+w["x1"])/2 < split_x]
         right_words = [w for w in body if (w["x0"]+w["x1"])/2 >= split_x]
 
+        if not left_words or not right_words:
+            x0 = min(w["x0"] for w in cw)
+            x1 = max(w["x1"] for w in cw)
+            return 0.0, [ColumnRegion(0, x0, x1, x1 - x0)], False
+
         lx0 = min(w["x0"] for w in left_words)
-        lx1 = min(split_x - 1, max(w["x1"] for w in left_words))
-        rx0 = max(split_x + 1, min(w["x0"] for w in right_words))
+        lx1 = max(w["x1"] for w in left_words)
+        rx0 = min(w["x0"] for w in right_words)
         rx1 = max(w["x1"] for w in right_words)
 
         cols = [

@@ -183,6 +183,8 @@ def apply_reflow(
         # including heading_bottom_y. No expansion, shrinking, or downstream
         # reflow is permitted.
         insert_text = re.sub(r'\n{2,}', '\n', patch.text_segment.strip())
+        # Sanitize unicode dashes to prevent question mark glyph substitutions in standard fonts
+        insert_text = insert_text.replace('\u2014', '--').replace('—', '--').replace('\u2013', '-').replace('–', '-')
         overflow = page.insert_textbox(
             rect,
             insert_text,

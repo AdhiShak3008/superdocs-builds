@@ -732,6 +732,11 @@ class FlowMapper:
             y0 = min(min(float(b.bbox.y0), float(b.bbox.y1)) for b in group)
             y1 = max(max(float(b.bbox.y0), float(b.bbox.y1)) for b in group)
             heading_bottom = 0.0
+            is_inline = (
+                section.title.strip().lower().startswith("abstract") or
+                section.title.strip().lower().startswith("keywords") or
+                section.title.strip().lower().startswith("index terms")
+            )
 
             if (
                 idx == 0
@@ -739,8 +744,14 @@ class FlowMapper:
                 and section.heading_block.page == page
                 and section.heading_block.column == column
             ):
-                heading_bottom = max(float(section.heading_block.bbox.y0), float(section.heading_block.bbox.y1))
-                y0 = max(y0, heading_bottom)
+                if is_inline:
+                    # Inline run-in headings share line 0 with the section body.
+                    # Start region at top of heading block and redact line 0.
+                    heading_bottom = 0.0
+                    y0 = min(y0, float(section.heading_block.bbox.y0))
+                else:
+                    heading_bottom = max(float(section.heading_block.bbox.y0), float(section.heading_block.bbox.y1))
+                    y0 = max(y0, heading_bottom)
 
             # Extend through genuinely unused space until the next physical obstacle in this column
             y1 = later_same_column_boundary(page, column, y1)

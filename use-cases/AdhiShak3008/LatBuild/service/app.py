@@ -419,49 +419,103 @@ def _bouncer_filter_changes(changes: list, original_text: str = "") -> list:
 
 def _find_old_text_span(original: str, old_text: str):
     """Find SuperDocs old text inside PDF-derived text with hyphenation tolerance."""
+    if not original or not old_text:
+        return None
+
+    # 1. Direct exact or case-insensitive substring
+    if old_text in original:
+        idx = original.find(old_text)
+        return idx, idx + len(old_text)
+
+    low_orig = original.lower()
+    low_old = old_text.lower()
+    if low_old in low_orig:
+        idx = low_orig.find(low_old)
+        return idx, idx + len(old_text)
+
+    # 2. Token-normalized window match
     source_tokens = _token_spans(original)
     old_tokens = _normalized_words(old_text)
 
-    if not source_tokens or not old_tokens:
-        return None
+    if source_tokens and old_tokens:
+        n = len(old_tokens)
+        for i in range(len(source_tokens) - n + 1):
+            candidate = [t["norm"] for t in source_tokens[i:i + n]]
+            if candidate == old_tokens:
+                return (
+                    source_tokens[i]["start"],
+                    source_tokens[i + n - 1]["end"],
+                )
 
-    n = len(old_tokens)
-    for i in range(len(source_tokens) - n + 1):
-        candidate = [t["norm"] for t in source_tokens[i:i + n]]
-        if candidate == old_tokens:
-            return (
-                source_tokens[i]["start"],
-                source_tokens[i + n - 1]["end"],
-            )
+    # 3. SequenceMatcher alignment fallback
+    orig_words = original.split()
+    old_words = old_text.split()
+    if orig_words and old_words:
+        import difflib
+        sm = difflib.SequenceMatcher(None, [w.lower() for w in orig_words], [w.lower() for w in old_words])
+        match = sm.find_longest_match(0, len(orig_words), 0, len(old_words))
+        if match.size >= max(3, int(len(old_words) * 0.4)):
+            w_start, w_end = match.a, match.a + match.size
+            char_idx = 0
+            starts = []
+            ends = []
+            for w in orig_words:
+                s_pos = original.find(w, char_idx)
+                starts.append(s_pos)
+                ends.append(s_pos + len(w))
+                char_idx = s_pos + len(w)
+            if 0 <= w_start < len(starts) and 0 < w_end <= len(ends):
+                return starts[w_start], ends[w_end - 1]
+
     return None
 
 
 def _apply_structured_changes_to_section(original_text: str, changes: list):
     """
     Apply only approved SuperDocs edits to the original section.
-
-    The original PDF text remains the source of truth. We replace only the
-    exact source spans corresponding to approved SuperDocs old_html values.
     """
-    result = original_text or ""
+    if not changes:
+        return original_text.strip() if original_text else None
 
     normalized = []
     for change in changes or []:
         old_text = _change_old_text(change)
         new_text = _change_new_text(change)
-        if old_text and new_text is not None:
+        if new_text is not None:
             normalized.append((old_text, new_text))
 
-    normalized.sort(key=lambda item: len(item[0]), reverse=True)
+    if not normalized:
+        return original_text.strip() if original_text else None
 
+    # If single change replacing the section, return new_text directly if old text spans most of section
+    if len(normalized) == 1:
+        old_t, new_t = normalized[0]
+        if not old_t or len(old_t.split()) >= max(3, int(len((original_text or '').split()) * 0.4)):
+            return new_t.strip()
+
+    # Find replacement spans in original text
+    located_spans = []
     for old_text, new_text in normalized:
-        span = _find_old_text_span(result, old_text)
-        if span is None:
-            return None
-        start, end = span
-        result = result[:start] + new_text + result[end:]
+        if not old_text:
+            continue
+        span = _find_old_text_span(original_text, old_text)
+        if span:
+            located_spans.append((span[0], span[1], new_text))
 
-    return result.strip()
+    if located_spans:
+        # Sort by start position descending to replace from end to beginning
+        located_spans.sort(key=lambda s: s[0], reverse=True)
+        result = original_text
+        for start, end, new_text in located_spans:
+            result = result[:start] + new_text + result[end:]
+        return result.strip()
+
+    # Fallback: if all approved changes have new text, join them
+    all_new = [new_t for _, new_t in normalized if new_t.strip()]
+    if all_new:
+        return "\n\n".join(all_new).strip()
+
+    return None
 
 @app.route("/api/transform", methods=["POST"])
 def api_transform():
@@ -631,7 +685,13 @@ def api_poll(job_id):
                 job.get("original_text", ""), approved_changes
             )
 
-        # Robust fallback: extract clean text directly from SuperDocs transformed HTML
+        # Robust fallback: extract clean text directly from SuperDocs transformed HTML or approved changes
+        if not proposed_text:
+            if approved_changes:
+                all_new = [_change_new_text(c) for c in approved_changes if _change_new_text(c)]
+                if all_new:
+                    proposed_text = "\n\n".join(all_new).strip()
+
         if not proposed_text:
             res = job_state.get("result") or {}
             raw_html = ""

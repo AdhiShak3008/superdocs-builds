@@ -223,6 +223,21 @@ class ReflowEngine:
         fontsize = sec_fontsize
         line_height = sec_line_height
 
+        # Handle inline heading prefix (e.g. "Abstract— " or "Keywords— ")
+        is_inline = (
+            section.title.strip().lower().startswith("abstract") or
+            section.title.strip().lower().startswith("keywords") or
+            section.title.strip().lower().startswith("index terms")
+        )
+        if is_inline:
+            prefix = section.title.strip()
+            first_word = prefix.split()[0].lower()
+            if not replacement_text.strip().lower().startswith(first_word):
+                if "—" in prefix or "--" in prefix or ":" in prefix or "–" in prefix:
+                    replacement_text = f"{prefix} {replacement_text.strip()}"
+                else:
+                    replacement_text = f"{prefix}— {replacement_text.strip()}"
+
         # ------------------------------------------------------------------
         # Step 1: Measure the replacement text
         # ------------------------------------------------------------------

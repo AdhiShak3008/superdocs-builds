@@ -90,8 +90,9 @@ def build_superdocs_instruction(
 
     if include_word_hint and extracted.word_count > 0:
         parts.append(
-            f"The original is approximately {extracted.word_count} words. "
-            "Length may vary as needed."
+            f"IMPORTANT: The original text is approximately {extracted.word_count} words ({extracted.char_count} characters). "
+            f"Your rewritten version MUST be approximately the same length (~{extracted.word_count} words, ±5%) "
+            f"to seamlessly fill the document layout without leaving empty blank spaces or causing overflow."
         )
 
     return "\n\n".join(parts)
